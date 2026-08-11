@@ -1,0 +1,5 @@
+ablation:
+  name: source_only
+  description: Fit Count-Granger using source normal bins only; target train is used only for normal score calibration.
+run:
+  use_target_train: false

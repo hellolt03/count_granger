@@ -1,0 +1,6 @@
+ablation:
+  name: stratified_balanced
+  description: Use stratified random validation/test sampling with a controlled anomaly ratio for balanced offline evaluation.
+split:
+  eval_mode: stratified_random
+  eval_anomaly_ratio: 0.5

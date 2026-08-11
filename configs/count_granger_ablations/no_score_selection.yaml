@@ -1,0 +1,5 @@
+﻿ablation:
+  name: no_score_selection
+  description: Disable validation-best score component selection and force the combined score.
+detect:
+  score_component: score

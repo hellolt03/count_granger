@@ -1,0 +1,8 @@
+﻿ablation:
+  name: residual_only
+  description: Use Granger-VAR prediction residual only; remove directional edge score from detection.
+granger:
+  residual_score_weight: 1.0
+  edge_score_weight: 0.0
+detect:
+  score_component: residual

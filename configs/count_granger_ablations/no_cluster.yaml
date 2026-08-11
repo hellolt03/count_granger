@@ -1,0 +1,5 @@
+﻿ablation:
+  name: no_cluster
+  description: Disable no-LLM semantic clustering; count normalized template identities directly.
+preprocess:
+  semantic_clustering: false

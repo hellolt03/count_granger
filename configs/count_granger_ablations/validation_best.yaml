@@ -1,0 +1,9 @@
+ablation:
+  name: validation_best
+  description: Select the best score component among combined, residual, and edge on validation data.
+detect:
+  score_component: validation_best
+  candidate_components:
+  - score
+  - residual
+  - edge

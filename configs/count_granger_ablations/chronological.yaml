@@ -1,0 +1,5 @@
+﻿ablation:
+  name: chronological
+  description: Use chronological validation/test split instead of stratified random evaluation.
+split:
+  eval_mode: chronological

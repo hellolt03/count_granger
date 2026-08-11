@@ -1,0 +1,8 @@
+ablation:
+  name: combined_score
+  description: Use the fixed combined score from residual and edge components.
+granger:
+  residual_score_weight: 1.0
+  edge_score_weight: 0.2
+detect:
+  score_component: score

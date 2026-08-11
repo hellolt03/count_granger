@@ -1,0 +1,5 @@
+﻿ablation:
+  name: target_only
+  description: Fit Count-Granger using target normal bins only; do not use source logs.
+run:
+  use_source: false

@@ -1,0 +1,3 @@
+﻿ablation:
+  name: full
+  description: Full Count-Granger with semantic clustering, combined/residual/edge validation-best score, and precision-constrained threshold.

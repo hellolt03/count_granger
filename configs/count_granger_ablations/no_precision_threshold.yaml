@@ -1,0 +1,7 @@
+﻿ablation:
+  name: no_precision_threshold
+  description: Use plain validation F1 threshold instead of precision-constrained thresholding.
+detect:
+  threshold_strategy: f1
+  min_precision: 0.0
+  score_component: validation_best
