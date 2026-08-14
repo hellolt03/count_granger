@@ -1,0 +1,14 @@
+split:
+  eval_mode: stratified_random
+  eval_anomaly_ratio: 0.5
+  eval_label_min_anomaly_lines: 10
+
+detect:
+  threshold_strategy: f1_at_precision
+  min_precision: 0.85
+  precision_threshold_min_recall: 0.2
+  score_component: validation_best
+  candidate_components:
+  - score
+  - residual
+  - edge

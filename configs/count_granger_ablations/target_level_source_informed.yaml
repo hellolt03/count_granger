@@ -1,0 +1,20 @@
+ablation:
+  name: target_level_source_informed
+  description: Target-aware level score with target-gated source-informed feature selection.
+
+granger:
+  target_score_enabled: true
+  target_score_top_ratio: 0.05
+  target_score_top_min: 3
+  target_score_min_scale: 0.000001
+  feature_selection_mode: source_informed
+  source_feature_weight: 0.25
+  source_feature_min_active_bins: 2
+
+detect:
+  score_component: validation_best
+  candidate_components:
+    - score
+    - residual
+    - edge
+    - level

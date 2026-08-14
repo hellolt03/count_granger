@@ -1,0 +1,7 @@
+ablation:
+  name: causal_score
+  description: Fuse robust residual with the Granger structural-consistency residual.
+detect:
+  score_component: causal_score
+  candidate_components:
+  - causal_score

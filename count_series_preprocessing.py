@@ -13,7 +13,7 @@ from sequence_preprocessing import (
     normalize_template,
 )
 
-COUNT_SERIES_SCHEMA_VERSION = 1
+COUNT_SERIES_SCHEMA_VERSION = 2
 LABEL_NORMAL = "-"
 
 
@@ -90,6 +90,7 @@ def _build_counts_for_log(
     counts = np.zeros((num_bins, cluster_vocab_size), dtype=np.float32)
     labels = np.zeros(num_bins, dtype=np.int64)
     line_counts = np.zeros(num_bins, dtype=np.int64)
+    anomaly_counts = np.zeros(num_bins, dtype=np.int64)
     for timestamp, template, label in _line_items(path, max_lines=max_lines, num_fields=num_fields, message_start=message_start):
         bin_index = int(np.floor((timestamp - min_ts) / time_bin_seconds))
         if bin_index < 0 or bin_index >= num_bins:
@@ -99,7 +100,8 @@ def _build_counts_for_log(
         counts[bin_index, cluster_id] += 1.0
         labels[bin_index] = max(labels[bin_index], int(label))
         line_counts[bin_index] += 1
-    return {"counts": counts, "labels": labels, "line_counts": line_counts}
+        anomaly_counts[bin_index] += int(label)
+    return {"counts": counts, "labels": labels, "line_counts": line_counts, "anomaly_counts": anomaly_counts}
 
 
 def _meta_path(path: str) -> str:
@@ -229,6 +231,7 @@ def preprocess_count_series_pair(
             counts=item["counts"],
             labels=item["labels"],
             line_counts=item["line_counts"],
+            anomaly_counts=item["anomaly_counts"],
             min_ts=np.asarray(float(scan["min_ts"]), dtype=np.float64),
             time_bin_seconds=np.asarray(float(time_bin_seconds), dtype=np.float64),
         )
@@ -242,6 +245,9 @@ def preprocess_count_series_pair(
             "num_bins": int(item["counts"].shape[0]),
             "num_features": int(item["counts"].shape[1]),
             "anomaly_bins": int(item["labels"].sum()),
+            "strong_anomaly_bins_ge_3": int((item["anomaly_counts"] >= 3).sum()),
+            "strong_anomaly_bins_ge_5": int((item["anomaly_counts"] >= 5).sum()),
+            "strong_anomaly_bins_ge_10": int((item["anomaly_counts"] >= 10).sum()),
             "line_count": int(scan["lines"]),
             "anomaly_lines": int(scan["anomalies"]),
             "preprocess": preprocess_config,
@@ -259,4 +265,11 @@ def preprocess_count_series_pair(
 
 def load_count_series(path: str) -> Dict[str, np.ndarray]:
     data = np.load(path)
-    return {"counts": data["counts"].astype(np.float32), "labels": data["labels"].astype(np.int64), "line_counts": data["line_counts"].astype(np.int64)}
+    labels = data["labels"].astype(np.int64)
+    anomaly_counts = data["anomaly_counts"].astype(np.int64) if "anomaly_counts" in data.files else labels.copy()
+    return {
+        "counts": data["counts"].astype(np.float32),
+        "labels": labels,
+        "line_counts": data["line_counts"].astype(np.int64),
+        "anomaly_counts": anomaly_counts,
+    }

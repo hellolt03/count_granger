@@ -1,0 +1,20 @@
+ablation:
+  name: source_ratio_0p5
+  description: Target-aware level with source train sampled to 0.5 times target train bins.
+
+run:
+  source_sample_ratio: 0.5
+
+granger:
+  target_score_enabled: true
+  target_score_top_ratio: 0.05
+  target_score_top_min: 3
+  target_score_min_scale: 0.000001
+
+detect:
+  score_component: validation_best
+  candidate_components:
+    - score
+    - residual
+    - edge
+    - level

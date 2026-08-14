@@ -21,6 +21,9 @@ DEFAULT_ABLATIONS = [
     "source_only",
     "edge_only",
     "residual_only",
+    "robust_residual_only",
+    "edge_consistency_only",
+    "causal_score",
     "combined_score",
     "validation_best",
     "stratified_balanced",
@@ -158,7 +161,8 @@ def run_one(
     effective_config = copy.deepcopy(base_config)
     deep_update(effective_config, override)
     effective_config["output_dir"] = os.path.join(run_dir, name)
-    effective_config["cache_dir"] = os.path.join(cache_root, pair_name(effective_source, target_data), name)
+    effective_config["cache_root"] = cache_root
+    effective_config["cache_dir"] = os.path.join(cache_root, pair_name(effective_source, target_data))
     effective_config.setdefault("run", {})["save_summary"] = bool(save_summary)
     os.makedirs(effective_config["output_dir"], exist_ok=True)
     os.makedirs(effective_config["cache_dir"], exist_ok=True)

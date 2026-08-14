@@ -40,14 +40,17 @@ DEFAULT_CONFIG = {
         "min_train_bins": 20,
         "eval_mode": "stratified_original",
         "eval_anomaly_ratio": 0.5,
+        "eval_label_min_anomaly_lines": 1,
         "random_seed": 8,
         "val_size": None,
         "test_size": None,
     },
     "run": {
         "use_target_train": True,
+        "source_sample_ratio": None,
         "min_target_calibration_normal_bins": 100,
         "target_calibration_fallback": "pooled",
+        "transfer_edge_include_validation_normal": False,
     },
     "granger": {
         "max_lag": 5,
@@ -59,12 +62,27 @@ DEFAULT_CONFIG = {
         "min_variance": 0.0001,
         "max_features": 128,
         "redundancy_threshold": 0.95,
+        "feature_selection_mode": "pooled",
+        "source_feature_weight": 0.25,
+        "source_feature_min_active_bins": 2,
         "edge_threshold": 0.01,
         "edge_selection": "top_k_per_target",
         "top_k_parents": 10,
         "remove_self_edges": True,
         "residual_score_weight": 1.0,
         "edge_score_weight": 0.2,
+        "transfer_edge_enabled": False,
+        "transfer_edge_min_node_total": 5.0,
+        "transfer_edge_min_node_active_bins": 2,
+        "transfer_edge_min_response_quantile": 0.5,
+        "transfer_edge_min_confidence": 0.0,
+        "transfer_edge_response_weight": 0.6,
+        "transfer_edge_rank_weight": 0.3,
+        "transfer_edge_weight_consistency_weight": 0.1,
+        "target_score_enabled": False,
+        "target_score_top_ratio": 0.05,
+        "target_score_top_min": 3,
+        "target_score_min_scale": 0.000001,
     },
     "detect": {
         "percentile": 95.0,
@@ -78,6 +96,15 @@ DEFAULT_CONFIG = {
         "validation_best_min_f1": 0.05,
         "score_component": "validation_best",
         "candidate_components": ["score", "residual", "edge"],
+        "weighted_search_alpha": 1.0,
+        "weighted_search_alpha_values": None,
+        "weighted_search_betas": [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0],
+        "weighted_search_normalized": False,
+    },
+    "postprocess": {
+        "enabled": False,
+        "min_consecutive": 1,
+        "rolling_mean_window": 1,
     },
     "output_root": "results/count_granger",
     "cache_root": "results/cache/count_granger",
@@ -197,6 +224,16 @@ def split_target_indices(num_bins: int, labels: np.ndarray, split_cfg: Dict[str,
     return train_idx, val_idx, test_idx
 
 
+def evaluation_labels(series: Dict[str, np.ndarray], split_cfg: Dict[str, Any]) -> np.ndarray:
+    min_lines = int(split_cfg.get("eval_label_min_anomaly_lines", 1) or 1)
+    if min_lines <= 1:
+        return series["labels"].astype(np.int64)
+    anomaly_counts = series.get("anomaly_counts")
+    if anomaly_counts is None:
+        anomaly_counts = series["labels"]
+    return (anomaly_counts.astype(np.int64) >= min_lines).astype(np.int64)
+
+
 def threshold_curve(scores: np.ndarray, labels: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     precision, recall, thresholds = metrics.precision_recall_curve(labels, scores)
     if len(thresholds) == 0:
@@ -303,14 +340,79 @@ def metrics_at(scores: np.ndarray, labels: np.ndarray, threshold: float) -> Dict
     return result
 
 
+def rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
+    window = int(max(1, window))
+    if window <= 1 or len(values) == 0:
+        return values.astype(np.float64, copy=True)
+    result = np.zeros(len(values), dtype=np.float64)
+    cumsum = np.cumsum(np.insert(values.astype(np.float64), 0, 0.0))
+    for index in range(len(values)):
+        start = max(0, index - window + 1)
+        result[index] = (cumsum[index + 1] - cumsum[start]) / (index - start + 1)
+    return result
+
+
+def apply_consecutive_filter(preds: np.ndarray, min_consecutive: int) -> np.ndarray:
+    min_consecutive = int(max(1, min_consecutive))
+    preds = np.asarray(preds, dtype=bool)
+    if min_consecutive <= 1 or len(preds) == 0:
+        return preds.copy()
+    filtered = np.zeros(len(preds), dtype=bool)
+    run_start = None
+    for index, value in enumerate(preds):
+        if value and run_start is None:
+            run_start = index
+        if (not value or index == len(preds) - 1) and run_start is not None:
+            run_end = index if value and index == len(preds) - 1 else index - 1
+            if run_end - run_start + 1 >= min_consecutive:
+                filtered[run_start : run_end + 1] = True
+            run_start = None
+    return filtered
+
+
+def apply_score_postprocess(scores: np.ndarray, postprocess_cfg: Dict[str, Any]) -> np.ndarray:
+    if not bool(postprocess_cfg.get("enabled", False)):
+        return scores.astype(np.float64, copy=True)
+    return rolling_mean(scores, int(postprocess_cfg.get("rolling_mean_window", 1)))
+
+
+def predictions_from_scores(scores: np.ndarray, threshold: float, postprocess_cfg: Dict[str, Any]) -> np.ndarray:
+    processed_scores = apply_score_postprocess(scores, postprocess_cfg)
+    preds = processed_scores > threshold
+    if bool(postprocess_cfg.get("enabled", False)):
+        preds = apply_consecutive_filter(preds, int(postprocess_cfg.get("min_consecutive", 1)))
+    return preds
+
+
+def metrics_at_with_postprocess(
+    scores: np.ndarray,
+    labels: np.ndarray,
+    threshold: float,
+    postprocess_cfg: Dict[str, Any],
+) -> Dict[str, float]:
+    processed_scores = apply_score_postprocess(scores, postprocess_cfg)
+    preds = predictions_from_scores(scores, threshold, postprocess_cfg)
+    precision, recall, f1, _ = metrics.precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
+    result = {"precision": float(precision), "recall": float(recall), "f1": float(f1)}
+    if len(np.unique(labels)) >= 2:
+        result["roc_auc"] = float(metrics.roc_auc_score(labels, processed_scores))
+        result["pr_auc"] = float(metrics.average_precision_score(labels, processed_scores))
+    result["postprocess_enabled"] = bool(postprocess_cfg.get("enabled", False))
+    result["min_consecutive"] = int(postprocess_cfg.get("min_consecutive", 1))
+    result["rolling_mean_window"] = int(postprocess_cfg.get("rolling_mean_window", 1))
+    return result
+
+
 def select_score_component(
     val_components: Dict[str, np.ndarray],
     test_components: Dict[str, np.ndarray],
     val_labels: np.ndarray,
     detect_cfg: Dict[str, Any],
+    postprocess_cfg: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, float, Dict[str, float], np.ndarray, np.ndarray]:
     requested = str(detect_cfg.get("score_component", "score"))
     candidates = list(detect_cfg.get("candidate_components", ["score", "residual", "edge"]))
+    postprocess_cfg = postprocess_cfg or {}
     if requested != "validation_best":
         candidates = [requested]
     min_best_recall = float(detect_cfg.get("validation_best_min_recall", 0.2))
@@ -324,21 +426,26 @@ def select_score_component(
         )
 
     best = None
-    for name in candidates:
-        if name not in val_components or name not in test_components:
-            continue
-        threshold, val_metrics = select_threshold(val_components[name], val_labels, detect_cfg)
-        item = (name, threshold, val_metrics, val_components[name], test_components[name])
+
+    def consider_candidate(name: str, val_scores: np.ndarray, test_scores: np.ndarray) -> None:
+        nonlocal best
+        val_for_threshold = apply_score_postprocess(val_scores, postprocess_cfg)
+        threshold, val_metrics = select_threshold(val_for_threshold, val_labels, detect_cfg)
+        if bool(postprocess_cfg.get("enabled", False)):
+            val_metrics = metrics_at_with_postprocess(val_scores, val_labels, threshold, postprocess_cfg)
+            val_metrics["strategy"] = str(detect_cfg.get("threshold_strategy", "f1"))
+            val_metrics["constraint_satisfied"] = True
+        item = (name, threshold, val_metrics, val_scores, test_scores)
         if best is None:
             best = item
-            continue
+            return
         _, _, best_metrics, _, _ = best
         current_eligible = eligible(val_metrics)
         best_eligible = eligible(best_metrics)
         if current_eligible != best_eligible:
             if current_eligible:
                 best = item
-            continue
+            return
         if (
             val_metrics.get("f1", 0.0) > best_metrics.get("f1", 0.0)
             or (
@@ -352,6 +459,29 @@ def select_score_component(
             )
         ):
             best = item
+
+    for name in candidates:
+        if name == "weighted_search":
+            if "residual" not in val_components or "edge" not in val_components:
+                continue
+            normalized_search = bool(detect_cfg.get("weighted_search_normalized", False))
+            alpha_values = detect_cfg.get("weighted_search_alpha_values")
+            if normalized_search:
+                alpha_values = alpha_values or [0.0, 0.25, 0.5, 0.75, 1.0]
+                pairs = [(float(alpha), 1.0 - float(alpha)) for alpha in alpha_values]
+            else:
+                alpha = float(detect_cfg.get("weighted_search_alpha", 1.0))
+                betas = detect_cfg.get("weighted_search_betas", [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0])
+                pairs = [(alpha, float(beta)) for beta in betas]
+            for alpha, beta in pairs:
+                candidate_name = f"weighted_search_a{alpha:g}_b{beta:g}".replace(".", "p")
+                val_scores = alpha * val_components["residual"] + beta * val_components["edge"]
+                test_scores = alpha * test_components["residual"] + beta * test_components["edge"]
+                consider_candidate(candidate_name, val_scores, test_scores)
+            continue
+        if name not in val_components or name not in test_components:
+            continue
+        consider_candidate(name, val_components[name], test_components[name])
     if best is None:
         raise ValueError("No valid score component candidates")
     return best
@@ -384,6 +514,22 @@ def normal_bin_count(labels: Optional[np.ndarray]) -> int:
     return int((labels.astype(np.int64) == 0).sum())
 
 
+def sample_source_train_indices(source_train_idx: np.ndarray, target_train_size: int, run_cfg: Dict[str, Any], seed: int) -> np.ndarray:
+    ratio = run_cfg.get("source_sample_ratio")
+    if ratio is None:
+        return source_train_idx
+    ratio = float(ratio)
+    if ratio < 0:
+        raise ValueError("source_sample_ratio must be non-negative or null")
+    sample_size = int(round(max(0, target_train_size) * ratio))
+    sample_size = min(sample_size, len(source_train_idx))
+    if sample_size <= 0:
+        return np.empty((0,), dtype=np.int64)
+    rng = np.random.default_rng(int(seed))
+    sampled = rng.choice(source_train_idx, size=sample_size, replace=False)
+    return np.sort(sampled.astype(np.int64))
+
+
 def fit_train_calibration_info(detector: CountGrangerDetector, *, reason: str) -> Dict[str, Any]:
     return {
         "normal_bins": None,
@@ -396,20 +542,51 @@ def fit_train_calibration_info(detector: CountGrangerDetector, *, reason: str) -
     }
 
 
-def save_scores(path: str, scores: Dict[str, np.ndarray], labels: np.ndarray, threshold: float, selected_component: str) -> None:
+def save_scores(
+    path: str,
+    scores: Dict[str, np.ndarray],
+    labels: np.ndarray,
+    threshold: float,
+    selected_component: str,
+    postprocess_cfg: Optional[Dict[str, Any]] = None,
+    selected_scores_override: Optional[np.ndarray] = None,
+) -> None:
+    postprocess_cfg = postprocess_cfg or {}
+    if selected_scores_override is not None:
+        selected_scores = selected_scores_override
+    elif selected_component in scores:
+        selected_scores = scores[selected_component]
+    else:
+        selected_scores = np.full(len(labels), np.nan, dtype=np.float64)
+    processed_scores = apply_score_postprocess(selected_scores, postprocess_cfg)
+    predictions = predictions_from_scores(selected_scores, threshold, postprocess_cfg)
     with open(path, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
-        writer.writerow(["bin", "label", "selected_score", "combined", "residual", "edge", "prediction", "selected_component"])
+        writer.writerow([
+            "bin",
+            "label",
+            "selected_score",
+            "processed_score",
+            "combined",
+            "residual",
+            "edge",
+            "transfer_edge",
+            "level",
+            "prediction",
+            "selected_component",
+        ])
         for index in range(len(labels)):
-            selected_score = float(scores[selected_component][index])
             writer.writerow([
                 index,
                 int(labels[index]),
-                selected_score,
+                float(selected_scores[index]),
+                float(processed_scores[index]),
                 float(scores["score"][index]),
                 float(scores["residual"][index]),
                 float(scores["edge"][index]),
-                int(selected_score > threshold),
+                float(scores.get("transfer_edge", np.full(len(labels), np.nan))[index]),
+                float(scores.get("level", np.full(len(labels), np.nan))[index]),
+                int(predictions[index]),
                 selected_component,
             ])
 
@@ -421,35 +598,60 @@ def run_train(args, config: Dict[str, Any]) -> Dict[str, Any]:
     paths = preprocess_count_series_pair(args.source_data, args.target_data, config["cache_dir"], **config["preprocess"])
     target = load_count_series(paths["target"])
     source = load_count_series(paths["source"]) if paths.get("source") else None
-    target_train_idx, target_val_idx, target_test_idx = split_target_indices(len(target["counts"]), target["labels"], config["split"])
+    eval_labels_all = evaluation_labels(target, config["split"])
+    target_train_idx, target_val_idx, target_test_idx = split_target_indices(len(target["counts"]), eval_labels_all, config["split"])
+    run_cfg = config.get("run", {})
     train_series = []
     train_labels = []
+    train_roles = []
     source_train_counts = None
     source_train_labels = None
+    source_train_idx_original = None
     if source is not None:
         source_train_idx, _, _ = split_indices(len(source["counts"]), config["split"], is_target=False)
+        source_train_idx_original = source_train_idx
+        source_train_idx = sample_source_train_indices(
+            source_train_idx,
+            len(target_train_idx),
+            run_cfg,
+            int(config.get("split", {}).get("random_seed", 8)),
+        )
         source_train_counts = source["counts"][source_train_idx]
         source_train_labels = source["labels"][source_train_idx]
-        train_series.append(source_train_counts)
-        train_labels.append(source_train_labels)
-        print(f"[count-main] source train bins={len(source_train_idx):,}", flush=True)
+        if len(source_train_idx):
+            train_series.append(source_train_counts)
+            train_labels.append(source_train_labels)
+            train_roles.append("source")
+        print(
+            f"[count-main] source train bins={len(source_train_idx):,}"
+            + (f" / original={len(source_train_idx_original):,}" if source_train_idx_original is not None else ""),
+            flush=True,
+        )
     use_target_train = bool(config.get("run", {}).get("use_target_train", True))
     target_train_counts = target["counts"][target_train_idx]
     target_train_labels = target["labels"][target_train_idx]
     if use_target_train:
         train_series.append(target_train_counts)
         train_labels.append(target_train_labels)
+        train_roles.append("target")
     elif source is None:
         raise ValueError("source_only requires source_data and at least one source training series")
+    if not train_series:
+        raise ValueError("No training series available after source sampling and target train selection")
     print(
         f"[count-main] target bins: train={len(target_train_idx):,}, val={len(target_val_idx):,}, test={len(target_test_idx):,}; "
         f"target anomaly bins={int(target['labels'].sum()):,}; "
+        f"eval anomaly bins={int(eval_labels_all.sum()):,}; "
+        f"eval_label_min_anomaly_lines={int(config['split'].get('eval_label_min_anomaly_lines', 1) or 1)}; "
         f"target_train_for_fit={use_target_train}",
         flush=True,
     )
     detector = CountGrangerDetector(CountGrangerConfig(**config["granger"]))
-    fit_info = detector.fit_many(train_series, train_labels)
-    run_cfg = config.get("run", {})
+    fit_info = detector.fit_many(train_series, train_labels, train_roles)
+    fit_info["train_roles"] = train_roles
+    fit_info["source_sample_ratio"] = run_cfg.get("source_sample_ratio")
+    fit_info["source_train_bins_original"] = None if source_train_idx_original is None else int(len(source_train_idx_original))
+    fit_info["source_train_bins_used"] = 0 if source_train_counts is None else int(len(source_train_counts))
     min_target_normal_bins = int(run_cfg.get("min_target_calibration_normal_bins", 100))
     calibration_fallback = str(run_cfg.get("target_calibration_fallback", "pooled")).lower()
     target_normal_bins = normal_bin_count(target_train_labels)
@@ -492,6 +694,25 @@ def run_train(args, config: Dict[str, Any]) -> Dict[str, Any]:
         }
     )
     fit_info["target_normal_calibration"] = target_calibration
+    transfer_target_counts = target_train_counts
+    transfer_target_labels = target_train_labels
+    if bool(run_cfg.get("transfer_edge_include_validation_normal", False)):
+        val_normal_idx = target_val_idx[eval_labels_all[target_val_idx] == 0]
+        if len(val_normal_idx):
+            transfer_target_counts = np.concatenate([target_train_counts, target["counts"][val_normal_idx]], axis=0)
+            transfer_target_labels = np.concatenate([target_train_labels, np.zeros(len(val_normal_idx), dtype=np.int64)], axis=0)
+    transfer_edge_info = detector.fit_transfer_edge_confidence(
+        transfer_target_counts,
+        transfer_target_labels,
+        source_train_counts,
+        source_train_labels,
+    )
+    transfer_edge_info["include_validation_normal"] = float(bool(run_cfg.get("transfer_edge_include_validation_normal", False)))
+    transfer_edge_info["target_confidence_bins"] = float(len(transfer_target_labels))
+    transfer_edge_info["target_confidence_normal_bins"] = float(normal_bin_count(transfer_target_labels))
+    fit_info["transfer_edge"] = transfer_edge_info
+    target_score_info = detector.fit_target_scores(target_train_counts, target_train_labels)
+    fit_info["target_scores"] = target_score_info
     print(
         "[count-main] calibration: "
         f"strategy={applied_calibration}, target_normal_bins={target_normal_bins}, "
@@ -499,18 +720,24 @@ def run_train(args, config: Dict[str, Any]) -> Dict[str, Any]:
         f"reason={calibration_reason}",
         flush=True,
     )
+    if transfer_edge_info.get("enabled"):
+        print(f"[count-main] transfer_edge={transfer_edge_info}", flush=True)
+    if target_score_info.get("enabled"):
+        print(f"[count-main] target_scores={target_score_info}", flush=True)
     print(f"[count-main] fit_info={fit_info}", flush=True)
     val_scores_all = detector.score(target["counts"][target_val_idx])
     test_scores_all = detector.score(target["counts"][target_test_idx])
-    val_labels = target["labels"][target_val_idx]
-    test_labels = target["labels"][target_test_idx]
+    val_labels = eval_labels_all[target_val_idx]
+    test_labels = eval_labels_all[target_test_idx]
+    postprocess_cfg = config.get("postprocess", {})
     selected_component, threshold, val_metrics, val_selected_scores, test_selected_scores = select_score_component(
         val_scores_all,
         test_scores_all,
         val_labels,
         config["detect"],
+        postprocess_cfg,
     )
-    test_metrics = metrics_at(test_selected_scores, test_labels, threshold)
+    test_metrics = metrics_at_with_postprocess(test_selected_scores, test_labels, threshold, postprocess_cfg)
     print(f"[count-eval] selected score component={selected_component}", flush=True)
     print(f"[count-eval] validation diagnostics: {score_diagnostics(val_selected_scores, val_labels)}", flush=True)
     print(f"[count-eval] test diagnostics: {score_diagnostics(test_selected_scores, test_labels)}", flush=True)
@@ -520,8 +747,24 @@ def run_train(args, config: Dict[str, Any]) -> Dict[str, Any]:
         flush=True,
     )
     detector.save(os.path.join(config["output_dir"], "count_granger_model.json"))
-    save_scores(os.path.join(config["output_dir"], "target_val_scores.csv"), val_scores_all, val_labels, threshold, selected_component)
-    save_scores(os.path.join(config["output_dir"], "target_test_scores.csv"), test_scores_all, test_labels, threshold, selected_component)
+    save_scores(
+        os.path.join(config["output_dir"], "target_val_scores.csv"),
+        val_scores_all,
+        val_labels,
+        threshold,
+        selected_component,
+        postprocess_cfg,
+        val_selected_scores,
+    )
+    save_scores(
+        os.path.join(config["output_dir"], "target_test_scores.csv"),
+        test_scores_all,
+        test_labels,
+        threshold,
+        selected_component,
+        postprocess_cfg,
+        test_selected_scores,
+    )
     summary = {
         "source_data": args.source_data,
         "target_data": args.target_data,

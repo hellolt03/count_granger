@@ -1,0 +1,10 @@
+split:
+  eval_mode: stratified_original
+
+detect:
+  threshold_strategy: f1
+  score_component: validation_best
+  candidate_components:
+  - score
+  - residual
+  - edge

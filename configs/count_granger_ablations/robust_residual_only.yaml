@@ -1,0 +1,7 @@
+ablation:
+  name: robust_residual_only
+  description: Use top-tail per-feature normalized prediction residuals only.
+detect:
+  score_component: robust_residual
+  candidate_components:
+  - robust_residual

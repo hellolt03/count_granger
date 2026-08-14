@@ -1,0 +1,24 @@
+ablation:
+  name: transfer_edge
+  description: Diagnostic transfer-confidence edge score; uses validation normal bins for target-side confidence estimation and should be judged on test metrics.
+
+run:
+  transfer_edge_include_validation_normal: true
+
+granger:
+  transfer_edge_enabled: true
+  transfer_edge_min_node_total: 5.0
+  transfer_edge_min_node_active_bins: 2
+  transfer_edge_min_response_quantile: 0.5
+  transfer_edge_min_confidence: 0.0
+  transfer_edge_response_weight: 0.6
+  transfer_edge_rank_weight: 0.3
+  transfer_edge_weight_consistency_weight: 0.1
+
+detect:
+  score_component: validation_best
+  candidate_components:
+    - score
+    - residual
+    - edge
+    - transfer_edge

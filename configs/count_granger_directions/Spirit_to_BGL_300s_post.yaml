@@ -1,0 +1,18 @@
+preprocess:
+  time_bin_seconds: 300.0
+
+split:
+  eval_mode: stratified_original
+
+detect:
+  threshold_strategy: f1
+  score_component: validation_best
+  candidate_components:
+  - score
+  - residual
+  - edge
+
+postprocess:
+  enabled: true
+  rolling_mean_window: 2
+  min_consecutive: 2

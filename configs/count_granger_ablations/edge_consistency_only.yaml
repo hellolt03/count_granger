@@ -1,0 +1,7 @@
+ablation:
+  name: edge_consistency_only
+  description: Use the top-k Granger structural-consistency residual only.
+detect:
+  score_component: edge_consistency
+  candidate_components:
+  - edge_consistency
