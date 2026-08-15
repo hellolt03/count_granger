@@ -3,7 +3,7 @@ import json
 import os
 import warnings
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -43,8 +43,13 @@ class CountGrangerConfig:
     transfer_edge_rank_weight: float = 0.3
     transfer_edge_weight_consistency_weight: float = 0.1
     target_score_enabled: bool = False
+    target_score_feature_scope: str = "selected"
+    target_score_feature_scopes: Optional[List[str]] = None
     target_score_top_ratio: float = 0.05
     target_score_top_min: int = 3
+    target_score_aggregation: str = "rank_weighted_mean"
+    target_score_rank_weight_power: float = 1.0
+    target_score_softmax_temperature: float = 1.0
     target_score_min_scale: float = 1e-6
 
 
@@ -68,9 +73,11 @@ class CountGrangerDetector:
         self.transfer_edge_info: Dict[str, float] = {}
         self.level_center: Optional[np.ndarray] = None
         self.level_scale: Optional[np.ndarray] = None
+        self.target_score_features: Optional[np.ndarray] = None
+        self.target_score_models: Dict[str, Dict[str, Any]] = {}
         self.train_level_center = 0.0
         self.train_level_scale = 1.0
-        self.target_score_info: Dict[str, float] = {}
+        self.target_score_info: Dict[str, Any] = {}
 
     def _transform(self, counts: np.ndarray) -> np.ndarray:
         values = counts.astype(np.float64, copy=False)
@@ -346,18 +353,106 @@ class CountGrangerDetector:
     def _residual_score(actual: np.ndarray, predicted: np.ndarray) -> np.ndarray:
         return np.mean(np.abs(actual - predicted), axis=1)
 
-    def _top_feature_mean(self, values: np.ndarray) -> np.ndarray:
-        if values.size == 0:
-            return np.zeros(values.shape[0], dtype=np.float64)
+    def _target_score_top_count(self, num_features: int) -> int:
         top_count = max(
             int(self.config.target_score_top_min),
-            int(np.ceil(float(self.config.target_score_top_ratio) * values.shape[1])),
+            int(np.ceil(float(self.config.target_score_top_ratio) * num_features)),
         )
-        top_count = min(max(1, top_count), values.shape[1])
+        return min(max(1, top_count), num_features)
+
+    def _normalize_target_score_scope(self, scope: str) -> str:
+        value = str(scope or "selected").lower().replace("-", "_")
+        if value == "selected":
+            return "selected"
+        if value.startswith("top_"):
+            suffix = value[len("top_") :]
+            if suffix.isdigit() and int(suffix) > 0:
+                return f"top{int(suffix)}"
+        if value.startswith("top"):
+            suffix = value[len("top") :]
+            if suffix.isdigit() and int(suffix) > 0:
+                return f"top{int(suffix)}"
+        if value in {"all", "all_target", "all_target_features"}:
+            return "all"
+        raise ValueError(
+            "target_score_feature_scope must be one of "
+            "{'selected', 'top_<positive integer>', 'all'}"
+        )
+
+    def _target_score_scope_limit(self, scope: str) -> Optional[int]:
+        normalized = self._normalize_target_score_scope(scope)
+        if normalized.startswith("top"):
+            return int(normalized[len("top") :])
+        return None
+
+    def _target_score_scopes(self) -> List[str]:
+        configured = self.config.target_score_feature_scopes
+        if configured:
+            raw_scopes = configured if isinstance(configured, (list, tuple)) else [configured]
+        else:
+            raw_scopes = [self.config.target_score_feature_scope or "selected"]
+        scopes = []
+        for scope in raw_scopes:
+            normalized = self._normalize_target_score_scope(str(scope))
+            if normalized not in scopes:
+                scopes.append(normalized)
+        return scopes or ["selected"]
+
+    def _target_score_component_name(self, scope: str) -> str:
+        return f"level_{self._normalize_target_score_scope(scope)}"
+
+    def _select_target_score_features(self, target_counts: np.ndarray, scope: str) -> np.ndarray:
+        if self.selected_features is None:
+            raise RuntimeError("Detector is not fitted")
+        normalized = self._normalize_target_score_scope(scope)
+        num_features = target_counts.shape[1]
+        if normalized == "selected":
+            return np.asarray(self.selected_features, dtype=np.int64)
+        if normalized == "all":
+            return np.arange(num_features, dtype=np.int64)
+        limit = self._target_score_scope_limit(normalized)
+        if limit is None:
+            raise ValueError(f"Unsupported target_score_feature_scope={scope}")
+        limit = min(int(limit), num_features)
+        totals = target_counts.sum(axis=0)
+        active_bins = (target_counts > 0).sum(axis=0)
+        variance = target_counts.var(axis=0)
+        order = np.lexsort((np.arange(num_features), -variance, -active_bins, -totals))
+        return np.asarray(order[:limit], dtype=np.int64)
+
+    def _top_feature_score(self, values: np.ndarray) -> np.ndarray:
+        if values.size == 0:
+            return np.zeros(values.shape[0], dtype=np.float64)
+        top_count = self._target_score_top_count(values.shape[1])
         if top_count == values.shape[1]:
-            return values.mean(axis=1)
-        top_values = np.partition(values, -top_count, axis=1)[:, -top_count:]
-        return top_values.mean(axis=1)
+            top_values = values
+        else:
+            top_values = np.partition(values, -top_count, axis=1)[:, -top_count:]
+        aggregation = str(self.config.target_score_aggregation or "rank_weighted_mean").lower()
+        if aggregation == "mean":
+            return top_values.mean(axis=1)
+        top_values = np.sort(top_values, axis=1)[:, ::-1]
+        if aggregation == "rank_weighted_mean":
+            power = max(float(self.config.target_score_rank_weight_power), 0.0)
+            ranks = np.arange(1, top_count + 1, dtype=np.float64)
+            weights = 1.0 / np.power(ranks, power)
+            return np.sum(top_values * weights[None, :], axis=1) / np.sum(weights)
+        if aggregation == "score_weighted_mean":
+            weights = np.maximum(top_values, 0.0)
+            denom = np.sum(weights, axis=1)
+            weighted = np.sum(top_values * weights, axis=1)
+            return np.divide(weighted, denom, out=np.zeros_like(weighted), where=denom > 0)
+        if aggregation == "softmax_weighted_mean":
+            temperature = max(float(self.config.target_score_softmax_temperature), 1e-6)
+            logits = top_values / temperature
+            logits = logits - np.max(logits, axis=1, keepdims=True)
+            weights = np.exp(logits)
+            weights = weights / np.sum(weights, axis=1, keepdims=True)
+            return np.sum(top_values * weights, axis=1)
+        raise ValueError(
+            "target_score_aggregation must be one of "
+            "{'mean', 'rank_weighted_mean', 'score_weighted_mean', 'softmax_weighted_mean'}"
+        )
 
     def _robust_feature_stats(self, values: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if len(values) == 0:
@@ -370,7 +465,7 @@ class CountGrangerDetector:
         )
         return center, scale
 
-    def fit_target_scores(self, target_counts: np.ndarray, target_labels: Optional[np.ndarray] = None) -> Dict[str, float]:
+    def fit_target_scores(self, target_counts: np.ndarray, target_labels: Optional[np.ndarray] = None) -> Dict[str, Any]:
         if not bool(self.config.target_score_enabled):
             self.target_score_info = {"enabled": 0.0, "reason": "disabled"}
             return self.target_score_info
@@ -378,33 +473,84 @@ class CountGrangerDetector:
             raise RuntimeError("Detector is not fitted")
         labels = np.zeros(len(target_counts), dtype=np.int64) if target_labels is None else target_labels.astype(np.int64)
         normal_mask = labels == 0
+        self.target_score_models = {}
         if not np.any(normal_mask):
             self.target_score_info = {"enabled": 1.0, "reason": "no_target_normal_bins", "normal_bins": 0.0}
             return self.target_score_info
-        values = self._transform(target_counts[:, self.selected_features])
-        self.level_center, self.level_scale = self._robust_feature_stats(values[normal_mask])
-        raw = self._target_raw_scores(target_counts)
-        self.train_level_center, self.train_level_scale = self._robust_stats(raw["level"][normal_mask])
+        scope_infos = {}
+        for scope in self._target_score_scopes():
+            features = self._select_target_score_features(target_counts, scope)
+            values = self._transform(target_counts[:, features])
+            center, scale = self._robust_feature_stats(values[normal_mask])
+            level_z = np.abs(values - center) / scale
+            level = self._top_feature_score(level_z)
+            train_center, train_scale = self._robust_stats(level[normal_mask])
+            component = self._target_score_component_name(scope)
+            model_info = {
+                "scope": scope,
+                "component": component,
+                "features": features,
+                "center": center,
+                "scale": scale,
+                "train_center": train_center,
+                "train_scale": train_scale,
+            }
+            self.target_score_models[scope] = model_info
+            scope_infos[scope] = {
+                "component": component,
+                "num_level_features": float(len(features)),
+                "top_features": float(self._target_score_top_count(len(features))),
+                "level_center": float(train_center),
+                "level_scale": float(train_scale),
+            }
+        first_scope = self._target_score_scopes()[0]
+        first_model = self.target_score_models[first_scope]
+        self.target_score_features = first_model["features"]
+        self.level_center = first_model["center"]
+        self.level_scale = first_model["scale"]
+        self.train_level_center = float(first_model["train_center"])
+        self.train_level_scale = float(first_model["train_scale"])
         self.target_score_info = {
             "enabled": 1.0,
             "normal_bins": float(normal_mask.sum()),
-            "top_features": float(max(
-                int(self.config.target_score_top_min),
-                int(np.ceil(float(self.config.target_score_top_ratio) * len(self.selected_features))),
-            )),
+            "feature_scope": first_scope,
+            "feature_scopes": list(self.target_score_models.keys()),
+            "components": [info["component"] for info in scope_infos.values()],
+            "num_level_features": float(len(self.target_score_features)),
+            "top_features": float(self._target_score_top_count(len(self.target_score_features))),
+            "aggregation": str(self.config.target_score_aggregation or "rank_weighted_mean"),
+            "rank_weight_power": float(self.config.target_score_rank_weight_power),
+            "softmax_temperature": float(self.config.target_score_softmax_temperature),
             "level_center": float(self.train_level_center),
             "level_scale": float(self.train_level_scale),
+            "scopes": scope_infos,
         }
         return self.target_score_info
 
     def _target_raw_scores(self, counts: np.ndarray) -> Dict[str, np.ndarray]:
         if self.selected_features is None:
             raise RuntimeError("Detector is not fitted")
+        result = {}
+        if self.target_score_models:
+            first_component = None
+            for scope, model_info in self.target_score_models.items():
+                values = self._transform(counts[:, model_info["features"]])
+                level_z = np.abs(values - model_info["center"]) / model_info["scale"]
+                level = self._top_feature_score(level_z)
+                component = str(model_info["component"])
+                result[component] = level
+                if first_component is None:
+                    first_component = component
+            if first_component is not None:
+                result["level"] = result[first_component]
+            return result
         if self.level_center is None or self.level_scale is None:
             return {}
-        values = self._transform(counts[:, self.selected_features])
+        if self.target_score_features is None:
+            self.target_score_features = np.asarray(self.selected_features, dtype=np.int64)
+        values = self._transform(counts[:, self.target_score_features])
         level_z = np.abs(values - self.level_center) / self.level_scale
-        level = self._top_feature_mean(level_z)
+        level = self._top_feature_score(level_z)
         return {"level": level}
 
     def _edge_score_from_lagged(self, x_lagged: np.ndarray, edge_weights: Optional[np.ndarray] = None) -> np.ndarray:
@@ -673,12 +819,35 @@ class CountGrangerDetector:
         result = {"score": combined, "residual": residual_norm, "edge": edge_norm}
         if "transfer_edge" in raw:
             result["transfer_edge"] = (raw["transfer_edge"] - self.train_transfer_edge_center) / self.train_transfer_edge_scale
-        if "level" in raw:
+        if self.target_score_models:
+            first_component = None
+            for model_info in self.target_score_models.values():
+                component = str(model_info["component"])
+                if component not in raw:
+                    continue
+                normalized = (raw[component] - float(model_info["train_center"])) / float(model_info["train_scale"])
+                result[component] = normalized
+                if first_component is None:
+                    first_component = component
+            if first_component is not None:
+                result["level"] = result[first_component]
+        elif "level" in raw:
             result["level"] = (raw["level"] - self.train_level_center) / self.train_level_scale
         return result
 
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        target_score_models = {}
+        for scope, model_info in self.target_score_models.items():
+            target_score_models[scope] = {
+                "scope": model_info["scope"],
+                "component": model_info["component"],
+                "features": model_info["features"].tolist(),
+                "center": model_info["center"].tolist(),
+                "scale": model_info["scale"].tolist(),
+                "train_center": float(model_info["train_center"]),
+                "train_scale": float(model_info["train_scale"]),
+            }
         payload = {
             "config": self.config.__dict__,
             "selected_features": None if self.selected_features is None else self.selected_features.tolist(),
@@ -695,6 +864,8 @@ class CountGrangerDetector:
             "train_transfer_edge_center": self.train_transfer_edge_center,
             "train_transfer_edge_scale": self.train_transfer_edge_scale,
             "transfer_edge_info": self.transfer_edge_info,
+            "target_score_features": None if self.target_score_features is None else self.target_score_features.tolist(),
+            "target_score_models": target_score_models,
             "level_center": None if self.level_center is None else self.level_center.tolist(),
             "level_scale": None if self.level_scale is None else self.level_scale.tolist(),
             "train_level_center": self.train_level_center,

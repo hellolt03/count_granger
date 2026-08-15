@@ -1,6 +1,6 @@
 ablation:
-  name: target_scores
-  description: Current mainline target-aware rank-weighted level with selected/top-50/top-100 scopes and edge-level fusion candidates.
+  name: target_scores_multi_scope
+  description: Target-aware rank-weighted level with selected/top-50/top-100 scopes in one validation-best run.
 
 granger:
   target_score_enabled: true

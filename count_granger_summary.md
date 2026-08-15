@@ -1050,3 +1050,615 @@ level
 ```
 
 其中 `change` 和 `burst` 可以暂时作为消融组件保留，但不宜作为主方法重点叙述。论文中更稳妥的表述是：Count-Granger 不仅利用正则化 VAR 提取 Granger 风格的定向影响异常，还引入目标域正常分布校准的局部计数偏离分数，以弥补纯 edge 分数在部分 target 上可分性不足的问题。
+
+## 30. Top-k weighted level 分数实验
+
+### 30.1 实验目的
+
+第 29 节中的 target-aware level score 使用 Top-k mean 聚合窗口内偏离最大的模板簇。该做法比较稳健，但会把最强局部异常和其他较弱偏离一起平均，可能稀释尖峰模板的贡献。因此，本轮尝试将 Top-k mean 改为 Top-k weighted mean，以增强 level 分数对局部异常的表达能力。
+
+本轮实验不改变 target-aware level 的基本定义，只改变 Top-k 聚合方式。代码中保留 `mean` 作为默认值，同时新增三种加权聚合：
+
+```text
+rank_weighted_mean
+score_weighted_mean
+softmax_weighted_mean
+```
+
+其中重点比较的是 `rank_weighted_mean`。该方法按照 Top-k 内部排名给更靠前的模板更高权重，默认 `target_score_rank_weight_power=1.0`。与 score-weighted 或 softmax-weighted 相比，rank-weighted 不直接依赖分数幅值，因此更保守，也更不容易被极端值主导。
+
+### 30.2 代码与配置
+
+本轮主要修改如下：
+
+```text
+count_granger_model.py
+count_granger_main.py
+configs/count_granger_config.yaml
+configs/count_granger_ablations/target_scores_rank_weighted_level.yaml
+configs/count_granger_ablations/target_scores_score_weighted_level.yaml
+configs/count_granger_ablations/target_scores_softmax_weighted_level.yaml
+```
+
+新增配置项包括：
+
+```text
+target_score_aggregation: mean | rank_weighted_mean | score_weighted_mean | softmax_weighted_mean
+target_score_rank_weight_power: 1.0
+target_score_softmax_temperature: 1.0
+```
+
+默认配置仍为：
+
+```text
+target_score_aggregation: mean
+```
+
+因此旧配置下的 target-aware level 结果保持不变。
+
+### 30.3 结果位置
+
+实验结果保存于：
+
+```text
+results/count_granger_weighted_level/20260814_111917_Thunderbird_to_Spirit1G
+results/count_granger_weighted_level/20260814_111940_Thunderbird_to_BGL
+results/count_granger_weighted_level/20260814_112003_Spirit1G_to_BGL
+results/count_granger_weighted_level/20260814_112048_BGL_to_Thunderbird
+results/count_granger_weighted_level/20260814_112107_BGL_to_Spirit1G
+results/count_granger_weighted_level/20260814_112125_Spirit1G_to_Thunderbird
+```
+
+额外的 `score_weighted_mean` 和 `softmax_weighted_mean` 对比结果保存于：
+
+```text
+results/count_granger_weighted_level/20260814_112341_Thunderbird_to_Spirit1G
+results/count_granger_weighted_level/20260814_112350_Thunderbird_to_BGL
+results/count_granger_weighted_level/20260814_112412_Spirit1G_to_BGL
+results/count_granger_weighted_level/20260814_112428_BGL_to_Thunderbird
+results/count_granger_weighted_level/20260814_112448_BGL_to_Spirit1G
+results/count_granger_weighted_level/20260814_112505_Spirit1G_to_Thunderbird
+```
+
+### 30.4 mean 与 rank-weighted 六方向对比
+
+| source | target | mean selected | mean Precision | mean Recall | mean F1 | rank-weighted selected | rank-weighted Precision | rank-weighted Recall | rank-weighted F1 | Delta F1 | rank-weighted ROC-AUC | rank-weighted PR-AUC |
+|---|---|---|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|
+| Thunderbird | Spirit | level | 0.704901 | 0.946935 | 0.808186 | level | 0.743117 | 0.972758 | 0.842571 | +0.034385 | 0.811438 | 0.727086 |
+| Thunderbird | BGL | level | 0.918782 | 0.775161 | 0.840883 | level | 0.918782 | 0.775161 | 0.840883 | +0.000000 | 0.884760 | 0.878243 |
+| Spirit | BGL | level | 0.915761 | 0.721627 | 0.807186 | level | 0.915761 | 0.721627 | 0.807186 | +0.000000 | 0.857560 | 0.841740 |
+| BGL | Thunderbird | level | 0.995592 | 0.991223 | 0.993403 | level | 0.996145 | 0.992320 | 0.994229 | +0.000826 | 0.995490 | 0.982789 |
+| BGL | Spirit | edge | 0.955905 | 0.879682 | 0.916211 | edge | 0.955905 | 0.879682 | 0.916211 | +0.000000 | 0.919236 | 0.857921 |
+| Spirit | Thunderbird | level | 0.995602 | 0.993417 | 0.994509 | level | 0.997785 | 0.988481 | 0.993111 | -0.001397 | 0.996822 | 0.992347 |
+
+### 30.5 三种 weighted 聚合对比
+
+| source | target | mean F1 | rank-weighted F1 | score-weighted F1 | softmax-weighted F1 | 最优 F1 |
+|---|---|---:|---:|---:|---:|---:|
+| Thunderbird | Spirit | 0.808186 | 0.842571 | 0.838198 | 0.836560 | 0.842571 |
+| Thunderbird | BGL | 0.840883 | 0.840883 | 0.840883 | 0.840883 | 0.840883 |
+| Spirit | BGL | 0.807186 | 0.807186 | 0.807186 | 0.807186 | 0.807186 |
+| BGL | Thunderbird | 0.993403 | 0.994229 | 0.992572 | 0.992026 | 0.994229 |
+| BGL | Spirit | 0.916211 | 0.916211 | 0.916211 | 0.916211 | 0.916211 |
+| Spirit | Thunderbird | 0.994509 | 0.993111 | 0.993943 | 0.993119 | 0.994509 |
+
+### 30.6 关键观察
+
+1. **rank-weighted level 对 Thunderbird -> Spirit 的提升最明显。** F1 从 `0.808186` 提升到 `0.842571`，Precision 从 `0.704901` 提升到 `0.743117`，Recall 从 `0.946935` 提升到 `0.972758`。这说明该方向中确实存在被普通 Top-k mean 稀释的局部高偏离模板。
+2. **BGL target 两个方向没有提升。** Thunderbird -> BGL 和 Spirit -> BGL 的 Precision、Recall、F1 均保持不变，同时 ROC-AUC 和 PR-AUC 略有下降。这说明 BGL target 的瓶颈不在 Top-k 内部加权，而更可能仍是异常窗口本身的分数可分性问题。
+3. **BGL -> Thunderbird 有小幅提升。** rank-weighted 的 F1 从 `0.993403` 提升到 `0.994229`，但提升幅度很小，不应作为主要论据。
+4. **Spirit -> Thunderbird 不适合替换为 rank-weighted。** rank-weighted 提高了 Precision，但 Recall 下降更多，F1 从 `0.994509` 降到 `0.993111`。
+5. **score-weighted 和 softmax-weighted 没有超过 rank-weighted。** 在 Thunderbird -> Spirit 上二者分别为 `0.838198` 和 `0.836560`，均低于 rank-weighted；在 Thunderbird target 的强方向上也没有稳定优势。
+
+### 30.7 当前判断
+
+Top-k weighted level 值得作为 target-aware level 的增强实验保留，但不适合直接替换默认 Top-k mean。当前更稳妥的做法是：默认 `target_score_aggregation=mean`，同时保留 `target_scores_rank_weighted_level` 作为候选消融配置。
+
+从六方向结果看，`rank_weighted_mean` 是三种加权方式中最值得继续跟进的一种。它对 Thunderbird -> Spirit 这类局部异常较明显的方向有实质提升，但对 BGL target 没有解决作用。因此后续若继续优化弱方向，BGL target 仍需要新的分数表达或评价校准思路，而不是继续只调 Top-k 聚合方式。
+
+
+## 31. Target-aware level 特征范围实验
+
+### 31.1 实验目的
+
+BGL false negative 诊断显示，BGL 目标域的漏检窗口中，异常行很多但落在原 `selected_features` 内的覆盖率很低。因此本轮不改变 Granger edge 的建模特征，只放宽 target-aware level score 的打分特征范围，用来验证漏检是否来自 level 可见模板过窄。
+
+本轮比较四种 level 特征范围：
+
+```text
+原 selected
+Top-50 target features
+Top-100 target features
+全部 target features
+```
+
+Top-50/Top-100 按 target 训练集模板总次数排序，活跃窗口数和方差用于打破并列；level 的正常基线仍只用 target normal 窗口校准。
+
+### 31.2 代码调整
+
+新增 `granger.target_score_feature_scope` 配置，支持 `selected`、`top_50`、`top_100`、`all`。`selected_features` 仍用于 Granger VAR、residual、edge 和 edge-level fusion 的 edge 部分；新增 `target_score_features` 仅用于 target-aware level 的正常基线拟合与 level 打分。模型保存文件中也写入 `target_score_features`，便于复查 Top-50/Top-100/all 实际覆盖了哪些模板。
+
+新增四个消融配置：
+
+```text
+configs/count_granger_ablations/target_scores_scope_selected.yaml
+configs/count_granger_ablations/target_scores_scope_top50.yaml
+configs/count_granger_ablations/target_scores_scope_top100.yaml
+configs/count_granger_ablations/target_scores_scope_all.yaml
+```
+
+### 31.3 六方向结果
+
+| source | target | scope | selected component | Precision | Recall | F1 |
+|---|---|---|---|---:|---:|---:|
+| Thunderbird | BGL | selected | level | 0.918782 | 0.775161 | 0.840883 |
+| Thunderbird | BGL | Top-50 | level | 0.962472 | 0.933619 | 0.947826 |
+| Thunderbird | BGL | Top-100 | level | 0.962472 | 0.933619 | 0.947826 |
+| Thunderbird | BGL | all | level | 0.962472 | 0.933619 | 0.947826 |
+| Spirit | BGL | selected | level | 0.915761 | 0.721627 | 0.807186 |
+| Spirit | BGL | Top-50 | level | 0.930804 | 0.892934 | 0.911475 |
+| Spirit | BGL | Top-100 | level | 0.931567 | 0.903640 | 0.917391 |
+| Spirit | BGL | all | level | 0.933884 | 0.967880 | 0.950578 |
+| Thunderbird | Spirit | selected | edge_level_fusion_level0p5 | 0.860934 | 0.957435 | 0.906624 |
+| Thunderbird | Spirit | Top-50 | edge_level_fusion_level0p75 | 0.927681 | 0.950057 | 0.938735 |
+| Thunderbird | Spirit | Top-100 | edge_level_fusion_level0p75 | 0.922152 | 0.958002 | 0.939736 |
+| Thunderbird | Spirit | all | edge_level_fusion_level0p25 | 0.654695 | 0.951759 | 0.775760 |
+| BGL | Spirit | selected | edge_level_fusion_level0p25 | 0.963043 | 0.887344 | 0.923645 |
+| BGL | Spirit | Top-50 | edge_level_fusion_level0p5 | 0.909091 | 0.953462 | 0.930748 |
+| BGL | Spirit | Top-100 | edge_level_fusion_level0p25 | 0.923549 | 0.939274 | 0.931345 |
+| BGL | Spirit | all | edge_level_fusion_level0p25 | 0.908543 | 0.941544 | 0.924749 |
+| BGL | Thunderbird | selected | level | 0.996145 | 0.992320 | 0.994229 |
+| BGL | Thunderbird | Top-50 | level | 1.000000 | 0.991223 | 0.995592 |
+| BGL | Thunderbird | Top-100 | level | 1.000000 | 0.991223 | 0.995592 |
+| BGL | Thunderbird | all | level | 1.000000 | 0.989578 | 0.994762 |
+| Spirit | Thunderbird | selected | level | 0.997785 | 0.988481 | 0.993111 |
+| Spirit | Thunderbird | Top-50 | level | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | Top-100 | level | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | all | level | 0.999447 | 0.991223 | 0.995318 |
+
+### 31.4 结果判断
+
+1. **BGL target 的弱方向明显提升。** Thunderbird -> BGL 从 `0.840883` 提升到 `0.947826`；Spirit -> BGL 从 `0.807186` 提升到 `0.950578`。这基本验证了前面的 false negative 诊断：原 selected 范围过窄，导致许多 BGL 异常模板没有进入 level score 的观察范围。
+2. **强方向没有被破坏。** BGL -> Thunderbird 和 Spirit -> Thunderbird 均从约 `0.993`/`0.994` 提升到约 `0.996`；BGL -> Spirit 也从 `0.923645` 小幅提升到 `0.931345`。
+3. **all target features 不适合作为默认主线。** 它在 Spirit -> BGL 上最好，但在 Thunderbird -> Spirit 上 F1 从 `0.906624` 降到 `0.775760`。Spirit 目标域训练正常窗口只有 2 个，all 会让 level 基线受低频模板和不稳定模板影响，泛化风险明显更高。
+4. **Top-50/Top-100 更适合纳入主候选。** 两者在六个方向上均不低于 selected，其中 Top-100 在 Thunderbird -> Spirit、BGL -> Spirit、Spirit -> BGL 上略优，Top-50 在 Thunderbird target 上与 Top-100 持平。当前更稳妥的主候选是 `selected + top_50 + top_100`，`all` 作为诊断或备用消融保留。
+
+### 31.5 结果保存位置
+
+六方向实验结果保存在：
+
+```text
+results/count_granger_level_feature_scope/20260814_135012_Thunderbird_to_BGL
+results/count_granger_level_feature_scope/20260814_135130_Spirit1G_to_BGL
+results/count_granger_level_feature_scope/20260814_135307_Thunderbird_to_Spirit1G
+results/count_granger_level_feature_scope/20260814_135350_BGL_to_Spirit1G
+results/count_granger_level_feature_scope/20260814_135458_BGL_to_Thunderbird
+results/count_granger_level_feature_scope/20260814_135609_Spirit1G_to_Thunderbird
+```
+
+汇总表保存在：
+
+```text
+results/count_granger_level_feature_scope/summary_scope_comparison.csv
+```
+
+
+## 32. 多 scope level 单次主线实验
+
+### 32.1 实验目的
+
+上一轮分别运行 `selected`、`Top-50`、`Top-100`、`all target features` 后发现，Top-50/Top-100 能显著增强 BGL target 弱方向，同时不会破坏强方向；但 `all` 在 Thunderbird -> Spirit 上明显退化。因此本轮将 `selected/top_50/top_100` 纳入同一次运行的 validation-best 候选，不再通过 test 结果事后选择 scope。
+
+### 32.2 代码调整
+
+新增 `granger.target_score_feature_scopes`，可在一次 detector 中同时拟合多个 target-aware level baseline。当前主线配置为：
+
+```text
+selected
+top_50
+top_100
+```
+
+一次运行会输出以下候选组件：
+
+```text
+level_selected
+level_top50
+level_top100
+edge_level_fusion_selected_level0p25 / 0p5 / 0p75
+edge_level_fusion_top50_level0p25 / 0p5 / 0p75
+edge_level_fusion_top100_level0p25 / 0p5 / 0p75
+```
+
+`target_scores.yaml` 已更新为当前主线配置；同时保留 `target_scores_multi_scope.yaml` 作为显式实验配置。
+
+### 32.3 六方向结果
+
+| source | target | selected component | Precision | Recall | F1 |
+|---|---|---|---:|---:|---:|
+| Thunderbird | BGL | level_top50 | 0.962472 | 0.933619 | 0.947826 |
+| Spirit | BGL | level_top100 | 0.931567 | 0.903640 | 0.917391 |
+| Thunderbird | Spirit | edge_level_fusion_top50_level0p75 | 0.927681 | 0.950057 | 0.938735 |
+| BGL | Spirit | edge_level_fusion_top50_level0p5 | 0.909091 | 0.953462 | 0.930748 |
+| BGL | Thunderbird | level_top50 | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | level_top50 | 1.000000 | 0.991223 | 0.995592 |
+
+### 32.4 结果判断
+
+1. **多 scope 单次主线达到了预期。** Thunderbird -> BGL 从原 selected 的 `0.840883` 提升到 `0.947826`；Spirit -> BGL 从 `0.807186` 提升到 `0.917391`。弱方向明显增强。
+2. **强方向保持。** BGL -> Thunderbird 和 Spirit -> Thunderbird 均达到 `0.995592`，比原 selected 主线略高。
+3. **edge + level 融合仍有价值。** Thunderbird -> Spirit 和 BGL -> Spirit 均选择了 edge-level fusion，而不是单独 level，说明融合候选应该保留在主线中。
+4. **不纳入 all 是合理的。** Spirit -> BGL 的 all 曾达到 `0.950578`，但 Thunderbird -> Spirit 的 all 降到 `0.775760`。当前主线选择 `selected/top50/top100` 是更稳妥的折中。
+
+### 32.5 结果保存位置
+
+```text
+results/count_granger_multi_scope_mainline/20260814_152733_Thunderbird_to_BGL
+results/count_granger_multi_scope_mainline/20260814_152824_Spirit1G_to_BGL
+results/count_granger_multi_scope_mainline/20260814_152856_Thunderbird_to_Spirit1G
+results/count_granger_multi_scope_mainline/20260814_152923_BGL_to_Spirit1G
+results/count_granger_multi_scope_mainline/20260814_152953_BGL_to_Thunderbird
+results/count_granger_multi_scope_mainline/20260814_153023_Spirit1G_to_Thunderbird
+```
+
+汇总表：
+
+```text
+results/count_granger_multi_scope_mainline/summary_multi_scope_mainline.csv
+```
+
+
+## 33. 当前模型主线总结
+
+### 33.1 总体定位
+
+当前 Count-Granger 的代码主线可以概括为：
+
+```text
+Count-Granger edge/residual
+        +
+Target-aware multi-scope rank-weighted level
+        +
+Edge-level fusion candidates
+        +
+Validation-best score selection
+```
+
+也就是说，模型仍然保留原来的 Granger 动态关系建模，同时加入 target 自己的局部计数异常分数，并让验证集在不同分数组件中选择最适合当前 source-target 方向的检测信号。
+
+### 33.2 Granger 主干
+
+日志首先被转换为窗口级模板计数序列：
+
+```text
+raw logs
+  ↓
+log template / semantic template
+  ↓
+window count series
+```
+
+随后模型基于 source 和 target 的训练窗口进行跨域特征筛选，得到 `selected_features`。这些特征仍然是 Granger 主干的唯一建模特征集合：
+
+```text
+selected_features
+  ↓
+lagged count series
+  ↓
+Ridge VAR / regularized Granger model
+  ↓
+residual score
+edge score
+```
+
+其中：
+
+- `residual score` 表示当前窗口的预测误差是否异常；
+- `edge score` 表示 Granger 边上的动态影响是否异常。
+
+注意，Top-50/Top-100 只用于后面的 level 分数，不改变 Granger VAR、residual 和 edge 的建模特征。
+
+### 33.3 Target-aware multi-scope level
+
+当前主线新增 target-aware level，用于捕捉目标域自身的局部计数异常。它的含义是：以 target normal 窗口为基准，判断当前 target 窗口中模板计数水平是否偏离正常。
+
+一次运行中同时拟合三个 level scope：
+
+```text
+selected
+top_50 target features
+top_100 target features
+```
+
+对应输出三个分数组件：
+
+```text
+level_selected
+level_top50
+level_top100
+```
+
+每个 scope 的 level 计算过程为：
+
+```text
+target normal windows
+  ↓
+拟合每个模板的正常计数水平
+  ↓
+current target window
+  ↓
+计算每个模板相对 target normal 的偏离
+  ↓
+取偏离最大的 top-k 个模板
+  ↓
+rank-weighted mean 聚合
+  ↓
+level score
+```
+
+当前默认聚合方式为：
+
+```text
+target_score_aggregation = rank_weighted_mean
+```
+
+这样做的原因是异常往往只体现在少数模板上，简单 mean 容易被大量正常模板稀释；rank-weighted mean 会让偏离最大的模板获得更高权重。
+
+### 33.4 Edge-level fusion
+
+当前主线还保留 edge + level 同次融合候选。模型会将 `edge` 分别与不同 scope 的 level 分数融合：
+
+```text
+edge + level_selected
+edge + level_top50
+edge + level_top100
+```
+
+每组融合尝试三个 level 权重：
+
+```text
+level weight = 0.25
+level weight = 0.50
+level weight = 0.75
+```
+
+融合前会基于 validation scores 做 robust normalization，避免 edge 和 level 因量纲不同而互相压制。输出候选形式例如：
+
+```text
+edge_level_fusion_selected_level0p25
+edge_level_fusion_top50_level0p5
+edge_level_fusion_top100_level0p75
+```
+
+这部分用于处理 edge 和 level 互补的方向，例如 Thunderbird -> Spirit 和 BGL -> Spirit。
+
+### 33.5 Validation-best 最终选择
+
+最终检测分数不是固定为某一个组件，而是由 validation-best 在同一次运行中选择。当前主线候选包括：
+
+```text
+score
+residual
+edge
+level_selected
+level_top50
+level_top100
+edge_level_fusion_selected_*
+edge_level_fusion_top50_*
+edge_level_fusion_top100_*
+```
+
+选择逻辑仍沿用当前检测配置中的 validation-best / F1-at-precision 机制。验证集选中某个 score component 和 threshold 后，再在 test set 上评估。
+
+最近一次六方向主线结果中，各方向选中的组件为：
+
+| source | target | selected component | Precision | Recall | F1 |
+|---|---|---|---:|---:|---:|
+| Thunderbird | BGL | level_top50 | 0.962472 | 0.933619 | 0.947826 |
+| Spirit | BGL | level_top100 | 0.931567 | 0.903640 | 0.917391 |
+| Thunderbird | Spirit | edge_level_fusion_top50_level0p75 | 0.927681 | 0.950057 | 0.938735 |
+| BGL | Spirit | edge_level_fusion_top50_level0p5 | 0.909091 | 0.953462 | 0.930748 |
+| BGL | Thunderbird | level_top50 | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | level_top50 | 1.000000 | 0.991223 | 0.995592 |
+
+### 33.6 当前不纳入 all target features 的原因
+
+`all target features` 仍作为消融和诊断配置保留，但不进入默认主线。原因是它的效果不稳定：
+
+```text
+Spirit -> BGL:
+all F1 = 0.950578，优于 Top-100
+
+Thunderbird -> Spirit:
+all F1 = 0.775760，明显低于 selected/top50/top100
+```
+
+因此当前主线采用更稳妥的 `selected + top_50 + top_100`，不默认加入 all。这个选择符合当前目标：弱方向更强，强方向至少保持，同时避免单个方向的大幅退化。
+
+### 33.7 当前代码主线配置
+
+当前主线配置文件为：
+
+```text
+configs/count_granger_ablations/target_scores.yaml
+```
+
+显式 multi-scope 实验配置为：
+
+```text
+configs/count_granger_ablations/target_scores_multi_scope.yaml
+```
+
+最近一次主线结果保存于：
+
+```text
+results/count_granger_multi_scope_mainline/summary_multi_scope_mainline.csv
+```
+
+### 33.8 一句话总结
+
+当前模型主线是：
+
+```text
+edge 看“关系是否异常”；
+level 看“target 自己的模板数量是否异常”；
+multi-scope 让 level 不再只看过窄的 selected features；
+edge-level fusion 捕捉二者互补；
+validation-best 决定当前方向最终相信哪个分数。
+```
+
+
+## 34. Target-aware level 不同 Top-K 范围消融
+
+### 34.1 实验目的
+
+上一轮主线采用 `selected/top50/top100` 三个 level scope。为了判断 Top-K 是否只是偶然选择，还是存在稳定有效区间，本轮加入更多 K 值进行消融：
+
+```text
+selected
+top25
+top50
+top75
+top100
+top150
+all
+```
+
+本轮仍采用单次 validation-best 选择，即同一次运行中同时提供不同 K 的 level 及 edge-level fusion 候选，由 validation set 选择最终 score component。
+
+### 34.2 代码与配置
+
+`count_granger_model.py` 已将 `target_score_feature_scope` 从固定 `top50/top100` 扩展为通用 Top-K 解析，支持：
+
+```text
+top_25 / top25
+top_75 / top75
+top_150 / top150
+```
+
+新增消融配置：
+
+```text
+configs/count_granger_ablations/target_scores_topk_sweep.yaml
+```
+
+### 34.3 六方向结果
+
+| source | target | selected component | Precision | Recall | F1 |
+|---|---|---|---:|---:|---:|
+| Thunderbird | BGL | level_top50 | 0.962472 | 0.933619 | 0.947826 |
+| Spirit | BGL | level_all | 0.933884 | 0.967880 | 0.950578 |
+| Thunderbird | Spirit | edge_level_fusion_top50_level0p75 | 0.927681 | 0.950057 | 0.938735 |
+| BGL | Spirit | edge_level_fusion_top25_level0p5 | 0.918328 | 0.954030 | 0.935839 |
+| BGL | Thunderbird | level_top25 | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | level_top25 | 1.000000 | 0.991223 | 0.995592 |
+
+### 34.4 与当前主线对比
+
+当前主线为 `selected/top50/top100`。Top-K sweep 与当前主线的 F1 对比如下：
+
+| source | target | 当前主线组件 | 当前主线 F1 | Top-K sweep 组件 | Top-K sweep F1 | Delta F1 |
+|---|---|---|---:|---|---:|---:|
+| Thunderbird | BGL | level_top50 | 0.947826 | level_top50 | 0.947826 | +0.000000 |
+| Spirit | BGL | level_top100 | 0.917391 | level_all | 0.950578 | +0.033187 |
+| Thunderbird | Spirit | edge_level_fusion_top50_level0p75 | 0.938735 | edge_level_fusion_top50_level0p75 | 0.938735 | +0.000000 |
+| BGL | Spirit | edge_level_fusion_top50_level0p5 | 0.930748 | edge_level_fusion_top25_level0p5 | 0.935839 | +0.005091 |
+| BGL | Thunderbird | level_top50 | 0.995592 | level_top25 | 0.995592 | +0.000000 |
+| Spirit | Thunderbird | level_top50 | 0.995592 | level_top25 | 0.995592 | +0.000000 |
+
+### 34.5 结果判断
+
+1. **Top-K 有必要做，但不宜当作无边界调参。** 本轮证明 K 的选择会影响结果，尤其 BGL -> Spirit 从 Top-50 融合切到 Top-25 融合后，F1 从 `0.930748` 提升到 `0.935839`。
+2. **Top-50 对 Thunderbird -> BGL 已经足够。** 加入 Top-25、Top-75、Top-150 和 all 后，validation 仍选择 `level_top50`，说明该方向在 Top-50 附近已经进入平台区。
+3. **Spirit -> BGL 的最高值来自 all。** 该方向 F1 从当前主线的 `0.917391` 提升到 `0.950578`。但这不能直接说明 all 应进入默认主线，因为 all 曾在单独 scope 实验中使 Thunderbird -> Spirit 明显退化。更稳妥的做法是后续设计 normal-bin gate，只在 target normal bins 充足时允许 all 进入候选。
+4. **Top-25 值得纳入下一版主线候选。** Top-25 在 BGL -> Spirit 上有小幅提升，在 Thunderbird target 两个方向与 Top-50 持平，未观察到负面影响。因此相比 all，Top-25 是更低风险的主线扩展。
+5. **不是 K 越大越好。** 六方向被选中的 K 包括 Top-25、Top-50、Top-100 和 all，说明不同 target 的有效特征范围不同。继续盲目扩大 K 没有充分依据。
+
+### 34.6 当前建议
+
+建议下一步将主线候选从：
+
+```text
+selected / top50 / top100
+```
+
+扩展为：
+
+```text
+selected / top25 / top50 / top100
+```
+
+`all` 暂时不直接纳入默认主线。更稳妥的后续方案是增加一个 target normal bins gate：当 target normal bins 足够多时，才允许 `level_all` 参与 validation-best；否则仍限制在 Top-K 中等范围内。
+
+### 34.7 结果保存位置
+
+```text
+results/count_granger_topk_sweep/summary_topk_sweep.csv
+results/count_granger_topk_sweep/20260814_163041_Thunderbird_to_BGL
+results/count_granger_topk_sweep/20260814_163137_Spirit1G_to_BGL
+results/count_granger_topk_sweep/20260814_163227_Thunderbird_to_Spirit1G
+results/count_granger_topk_sweep/20260814_163308_BGL_to_Spirit1G
+results/count_granger_topk_sweep/20260814_163359_BGL_to_Thunderbird
+results/count_granger_topk_sweep/20260814_163447_Spirit1G_to_Thunderbird
+```
+
+## 35. 固定 Top-25 与固定 Top-50 消融
+
+### 35.1 实验目的
+
+上一轮 Top-K sweep 表明，不同方向被选中的有效 level scope 并不完全一致。本轮进一步固定单一 K 值，分别只允许 `top25` 或 `top50` 参与 target-aware level 与 edge-level fusion 候选，用来判断是否有必要将 Top-K 固定为某个统一值。
+
+本轮配置为：
+
+```text
+configs/count_granger_ablations/target_scores_fixed_top25.yaml
+configs/count_granger_ablations/target_scores_fixed_top50.yaml
+```
+
+结果汇总保存为：
+
+```text
+results/count_granger_fixed_topk/summary_fixed_top25_top50.csv
+```
+
+### 35.2 六方向结果
+
+| source | target | fixed scope | selected component | Precision | Recall | F1 |
+|---|---|---|---|---:|---:|---:|
+| Thunderbird | BGL | top25 | level | 0.928899 | 0.867238 | 0.897010 |
+| Thunderbird | BGL | top50 | level | 0.962472 | 0.933619 | 0.947826 |
+| Spirit | BGL | top25 | level | 0.921833 | 0.732334 | 0.816229 |
+| Spirit | BGL | top50 | level | 0.930804 | 0.892934 | 0.911475 |
+| Thunderbird | Spirit | top25 | edge_level_fusion_level0p5 | 0.900510 | 0.952894 | 0.925962 |
+| Thunderbird | Spirit | top50 | edge_level_fusion_level0p75 | 0.927681 | 0.950057 | 0.938735 |
+| BGL | Spirit | top25 | edge_level_fusion_level0p5 | 0.918328 | 0.954030 | 0.935839 |
+| BGL | Spirit | top50 | edge_level_fusion_level0p5 | 0.909091 | 0.953462 | 0.930748 |
+| BGL | Thunderbird | top25 | level | 1.000000 | 0.991223 | 0.995592 |
+| BGL | Thunderbird | top50 | level | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | top25 | level | 1.000000 | 0.991223 | 0.995592 |
+| Spirit | Thunderbird | top50 | level | 1.000000 | 0.991223 | 0.995592 |
+
+### 35.3 结果判断
+
+1. **不建议把 Top-K 固定为 Top-25。** Thunderbird -> BGL 的 F1 从 `0.947826` 降到 `0.897010`，Spirit -> BGL 从当前多 scope 主线的 `0.917391` 降到 `0.816229`。Top-25 对 BGL -> Spirit 有小幅提升，但无法覆盖它在 BGL target 方向上的明显损失。
+2. **固定 Top-50 可以作为强基线，但不应替代多 scope 主线。** Top-50 在 Thunderbird -> BGL、Thunderbird -> Spirit 以及两个 Thunderbird target 方向上与当前主线持平；但在 Spirit -> BGL 上低于当前主线的 `level_top100`，在 BGL -> Spirit 上低于固定 Top-25。
+3. **固定单一 K 的方向适配性不足。** 六个方向中，Top-50 更稳，但不是所有方向最优；Top-25 对局部异常更敏感，但在 BGL target 上召回损失较大。
+4. **当前更合理的主线仍是多 scope validation-best。** 即 `selected/top25/top50/top100` 作为候选，让 validation set 根据目标域表现选择最终 component。`all` 暂时不建议无条件纳入默认主线，需要后续 normal-bin gate 或其他约束后再测试。
+
+### 35.4 与当前主线的关系
+
+固定 Top-50 的结果说明 `top50` 是一个可靠的中心尺度，但实验不支持“固定 Top-50 就足够”。当前主线应保留多尺度候选，并将 Top-25 纳入候选集，而不是把 Top-K 固定为某一个值。
+
+建议下一版默认候选为：
+
+```text
+selected / top25 / top50 / top100
+```
+
+不建议默认候选为：
+
+```text
+top25 only
+top50 only
+all without gate
+```

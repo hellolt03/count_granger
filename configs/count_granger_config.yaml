@@ -43,6 +43,15 @@ granger:
   remove_self_edges: true
   residual_score_weight: 1.0
   edge_score_weight: 0.2
+  target_score_enabled: false
+  target_score_feature_scope: selected
+  target_score_feature_scopes: null
+  target_score_top_ratio: 0.05
+  target_score_top_min: 3
+  target_score_aggregation: rank_weighted_mean
+  target_score_rank_weight_power: 1.0
+  target_score_softmax_temperature: 1.0
+  target_score_min_scale: 0.000001
 detect:
   percentile: 95.0
   zscore: false
@@ -58,6 +67,12 @@ detect:
   - score
   - residual
   - edge
+  edge_level_fusion_level_weights:
+  - 0.25
+  - 0.5
+  - 0.75
+  edge_level_fusion_level_components: null
+  edge_level_fusion_normalized: true
 output_root: results/count_granger
 cache_root: results/cache/count_granger
 output_dir: null

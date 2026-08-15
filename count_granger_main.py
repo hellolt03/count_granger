@@ -80,8 +80,13 @@ DEFAULT_CONFIG = {
         "transfer_edge_rank_weight": 0.3,
         "transfer_edge_weight_consistency_weight": 0.1,
         "target_score_enabled": False,
+        "target_score_feature_scope": "selected",
+        "target_score_feature_scopes": None,
         "target_score_top_ratio": 0.05,
         "target_score_top_min": 3,
+        "target_score_aggregation": "rank_weighted_mean",
+        "target_score_rank_weight_power": 1.0,
+        "target_score_softmax_temperature": 1.0,
         "target_score_min_scale": 0.000001,
     },
     "detect": {
@@ -100,6 +105,9 @@ DEFAULT_CONFIG = {
         "weighted_search_alpha_values": None,
         "weighted_search_betas": [0.0, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0],
         "weighted_search_normalized": False,
+        "edge_level_fusion_level_weights": [0.25, 0.5, 0.75],
+        "edge_level_fusion_level_components": None,
+        "edge_level_fusion_normalized": True,
     },
     "postprocess": {
         "enabled": False,
@@ -427,6 +435,15 @@ def select_score_component(
 
     best = None
 
+    def normalize_from_validation(val_scores: np.ndarray, test_scores: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        center = float(np.median(val_scores)) if len(val_scores) else 0.0
+        if len(val_scores):
+            q75, q25 = np.percentile(val_scores, [75, 25])
+            scale = float(max((q75 - q25) / 1.349, np.std(val_scores), 1e-8))
+        else:
+            scale = 1.0
+        return (val_scores - center) / scale, (test_scores - center) / scale
+
     def consider_candidate(name: str, val_scores: np.ndarray, test_scores: np.ndarray) -> None:
         nonlocal best
         val_for_threshold = apply_score_postprocess(val_scores, postprocess_cfg)
@@ -478,6 +495,42 @@ def select_score_component(
                 val_scores = alpha * val_components["residual"] + beta * val_components["edge"]
                 test_scores = alpha * test_components["residual"] + beta * test_components["edge"]
                 consider_candidate(candidate_name, val_scores, test_scores)
+            continue
+        if name == "edge_level_fusion":
+            if "edge" not in val_components:
+                continue
+            configured_levels = detect_cfg.get("edge_level_fusion_level_components")
+            if configured_levels:
+                level_components = configured_levels if isinstance(configured_levels, list) else [configured_levels]
+            else:
+                level_components = ["level"]
+            level_weights = detect_cfg.get("edge_level_fusion_level_weights", [0.25, 0.5, 0.75])
+            if bool(detect_cfg.get("edge_level_fusion_normalized", True)):
+                val_edge, test_edge = normalize_from_validation(val_components["edge"], test_components["edge"])
+            else:
+                val_edge, test_edge = val_components["edge"], test_components["edge"]
+            for level_component in level_components:
+                if level_component not in val_components or level_component not in test_components:
+                    continue
+                if bool(detect_cfg.get("edge_level_fusion_normalized", True)):
+                    val_level, test_level = normalize_from_validation(
+                        val_components[level_component], test_components[level_component]
+                    )
+                else:
+                    val_level, test_level = val_components[level_component], test_components[level_component]
+                level_suffix = str(level_component)
+                if level_suffix.startswith("level_"):
+                    level_suffix = level_suffix[len("level_") :]
+                for level_weight in level_weights:
+                    level_weight = float(level_weight)
+                    edge_weight = 1.0 - level_weight
+                    if str(level_component) == "level":
+                        candidate_name = f"edge_level_fusion_level{level_weight:g}".replace(".", "p")
+                    else:
+                        candidate_name = f"edge_level_fusion_{level_suffix}_level{level_weight:g}".replace(".", "p")
+                    val_scores = edge_weight * val_edge + level_weight * val_level
+                    test_scores = edge_weight * test_edge + level_weight * test_level
+                    consider_candidate(candidate_name, val_scores, test_scores)
             continue
         if name not in val_components or name not in test_components:
             continue

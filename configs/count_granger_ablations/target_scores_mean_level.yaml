@@ -1,0 +1,18 @@
+ablation:
+  name: target_scores_mean_level
+  description: Target-aware level score using the previous top-k mean aggregation.
+
+granger:
+  target_score_enabled: true
+  target_score_top_ratio: 0.05
+  target_score_top_min: 3
+  target_score_aggregation: mean
+  target_score_min_scale: 0.000001
+
+detect:
+  score_component: validation_best
+  candidate_components:
+    - score
+    - residual
+    - edge
+    - level

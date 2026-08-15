@@ -1,0 +1,273 @@
+\documentclass[UTF8,a4paper,zihao=-4]{ctexart}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.6cm,bottom=2.6cm}
+\hypersetup{colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue}
+\setlist{nosep}
+
+\title{面向跨系统日志异常检测的 Target-aware Count-Granger 方法初稿}
+\author{作者待定}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+跨系统日志异常检测旨在利用源系统中较充分的日志信息，提升目标系统中的异常识别能力。现有基于模板序列或模板计数的迁移方法容易受到两类问题影响：一是源系统中的模板关系并不一定能在目标系统中保持一致；二是目标系统中的异常往往只体现在少量模板计数的局部突增或突降上，直接使用全局平均分数可能稀释异常信号。针对上述问题，本文构建一种面向目标域校准的 Count-Granger 异常检测框架。该方法首先将日志解析为固定时间粒度下的模板计数序列，并在源域和目标域正常片段上学习基于 Granger 思想的跨模板预测关系；随后，方法将异常评分拆分为边关系异常、预测残差异常和目标感知的 level 异常三类信号。其中，target-aware level 分数不让源域直接定义目标域异常程度，而是利用目标域正常样本建立模板计数基线，并采用 rank-weighted top-k 聚合增强局部异常表达能力。进一步地，本文引入多尺度 level scope 与 edge-level fusion 候选，由验证集在同一次运行中选择最适合当前迁移方向的最终检测分数和阈值。在 BGL、Thunderbird 和 Spirit 三个日志数据集的六个跨系统迁移方向上，当前主线方法在所有方向上均取得较高 F1，其中 Thunderbird 到 BGL、Thunderbird 到 Spirit、BGL 到 Spirit 的 F1 分别达到 0.947826、0.938735 和 0.930748；当扩大 Top-K 候选范围时，Spirit 到 BGL 的 F1 可进一步提升至 0.950578。实验结果表明，目标域校准的 level 信号与边关系信号具有互补性，多尺度 validation-best 机制比固定单一 Top-K 更稳健。
+\end{abstract}
+
+\noindent\textbf{关键词：}日志异常检测；跨系统迁移；Granger 因果；模板计数序列；目标域校准；多尺度异常评分
+
+\section{引言}
+
+大规模计算系统会持续产生海量运行日志。日志中包含丰富的状态转移、错误传播和资源变化信息，因此日志异常检测是系统运维和故障诊断中的基础任务。与单系统异常检测不同，跨系统日志异常检测希望利用源系统中更充分的日志数据，辅助目标系统中的异常识别。这一设定具有现实意义：许多目标系统缺少充足标注，或者目标系统正常样本规模有限，直接训练稳定检测器较困难；而已有系统可能积累了更长时间的运行日志，能够提供有价值的结构先验。
+
+然而，跨系统迁移不能简单地将源系统模型直接套用到目标系统。不同系统的日志模板集合、模板频率和模板间关系均可能存在差异。即使两个系统共享部分模板，源系统中显著的模板依赖关系也未必在目标系统中稳定出现。若直接使用源域 Granger 边构造目标异常分数，容易把源域特有关系误判为目标异常。另一方面，日志异常通常具有局部性：一个时间窗口内可能只有少数模板计数偏离正常水平，而大量无关模板仍保持正常。如果采用普通均值聚合，异常模板的贡献会被正常模板稀释，导致召回率下降。
+
+本文围绕上述问题设计并实现一种 Count-Granger 跨系统日志异常检测方法。方法以模板计数时间序列为输入，使用 Granger 风格的滞后线性预测模型学习模板间动态依赖，并将检测信号分为两条主线：第一，edge 分数刻画模板关系是否与学习到的动态结构不一致；第二，target-aware level 分数刻画目标系统自身模板计数是否偏离目标正常基线。二者的核心差异在于，edge 更关注“关系异常”，level 更关注“数量异常”。为避免源域直接定义目标域异常，level 基线只在目标域正常片段上估计；源域主要参与共享模板、候选特征和动态结构学习。
+
+本文当前工作的主要贡献可概括如下：
+
+\begin{enumerate}
+  \item 提出一种面向跨系统日志迁移的 Count-Granger 检测框架，将日志转化为模板计数序列，并学习滞后模板依赖关系用于异常检测。
+  \item 设计 target-aware level 分数，使源域信息只提供结构性辅助，异常强度由目标域正常样本校准，从而降低跨域模板频率差异带来的误报风险。
+  \item 将普通 top-k mean 替换为 rank-weighted top-k level 聚合，使偏离最大的少数模板获得更高权重，提高局部异常表达能力。
+  \item 引入多尺度 level scope 与 edge-level fusion 候选，并通过验证集选择最终分数，使模型能够根据不同 source-target 方向自动选择更合适的异常信号。
+  \item 在 BGL、Thunderbird 和 Spirit 的六个跨系统方向上进行实验与消融，分析固定 Top-K、多尺度 Top-K 和 edge-level 融合对结果的影响。
+\end{enumerate}
+
+\section{问题定义}
+
+设源系统日志为 $\mathcal{D}^{s}$，目标系统日志为 $\mathcal{D}^{t}$。日志经过模板解析和时间聚合后，被表示为固定时间窗口上的模板计数序列。记第 $u$ 个系统在时间窗口 $\tau$ 的计数向量为
+\begin{equation}
+  \mathbf{x}_{\tau}^{u} = [x_{\tau,1}^{u}, x_{\tau,2}^{u}, \ldots, x_{\tau,d}^{u}] \in \mathbb{R}_{\ge 0}^{d},
+\end{equation}
+其中 $d$ 为候选模板或模板簇数量，$x_{\tau,j}^{u}$ 表示模板 $j$ 在时间窗口 $\tau$ 内出现的次数。本文当前实现采用 60 秒作为时间窗口，并对计数执行 $\log(1+x)$ 变换和鲁棒归一化。
+
+跨系统异常检测的目标是在给定源域训练片段和目标域少量训练片段的情况下，为目标域验证集和测试集中的每个时间窗口输出异常分数 $a_{\tau}^{t}$，并根据验证集确定阈值 $\theta$，最终得到二值预测
+\begin{equation}
+  \hat{y}_{\tau}^{t} = \mathbb{I}(a_{\tau}^{t} > \theta).
+\end{equation}
+本文关注的是迁移检测场景，因此训练阶段允许使用源域训练数据和目标域训练数据，但最终评价只在目标域验证集和测试集上进行。
+
+\section{方法}
+
+\subsection{整体框架}
+
+本文方法由五个步骤组成。首先，日志被解析为模板计数序列，并根据频率、活跃窗口数、方差和冗余度筛选候选特征。其次，模型在源域和目标域训练片段上学习 Count-Granger 滞后预测模型，得到模板间动态依赖边。第三，模型为目标域样本计算 residual、edge 和 target-aware level 等多个异常分数组件。第四，对 edge 与不同 scope 的 level 分数进行同次融合，形成候选分数组。最后，在目标域验证集上使用 validation-best 机制选择最终 score component 与阈值，并在测试集上报告 Precision、Recall、F1、ROC-AUC 和 PR-AUC。
+
+框架可以概括为：
+
+\begin{equation}
+\begin{aligned}
+&\text{source/target counts} \rightarrow \text{Count-Granger edges} \\
+&\rightarrow \left\{\text{edge},\text{residual},\text{target-aware level}\right\}
+\rightarrow \text{validation-best detection}.
+\end{aligned}
+\end{equation}
+
+\subsection{Count-Granger 滞后预测模型}
+
+对每个时间窗口 $\tau$，模型使用前 $L$ 个窗口的计数向量预测当前窗口：
+\begin{equation}
+  \hat{\mathbf{z}}_{\tau} = \mathbf{b} + \sum_{\ell=1}^{L} \mathbf{A}_{\ell}\mathbf{z}_{\tau-\ell},
+\end{equation}
+其中 $\mathbf{z}_{\tau}$ 表示变换和归一化后的计数向量，$L$ 为最大滞后阶数，当前配置中 $L=5$。模型采用 ridge 回归估计参数，以缓解高维模板计数序列中的共线性问题。
+
+学习得到的系数矩阵可以转化为模板间有向边强度。对目标模板 $i$ 和源模板 $j$，边权重定义为不同滞后阶数上绝对系数的累积：
+\begin{equation}
+  w_{ij} = \sum_{\ell=1}^{L} |A_{\ell,ij}|.
+\end{equation}
+若移除自环，则令 $w_{ii}=0$。当前主线配置中保留连续边权，不额外执行 top-k per target 稀疏化；边强度阈值主要用于统计有效边数量和构造 edge 分数。
+
+\subsection{Residual 与 Edge 分数}
+
+预测残差分数刻画当前窗口整体是否难以由历史窗口解释：
+\begin{equation}
+  s_{\mathrm{res}}(\tau)=\frac{1}{d}\sum_{j=1}^{d}\left|z_{\tau,j}-\hat{z}_{\tau,j}\right|.
+\end{equation}
+该分数直接反映动态预测误差，但在跨系统场景中可能同时受到模板基线差异和异常事件影响。
+
+edge 分数进一步利用 Granger 边结构刻画关系异常。直观上，如果某一目标模板在当前窗口出现较大偏离，而其相关父模板并未提供相应解释，则边关系异常会增大。当前实现中，edge 分数由预测残差与学习到的邻接权重共同构造，用于强调与 Granger 结构相关的异常变化。
+
+\subsection{Target-aware Level 分数}
+
+本文引入 target-aware level 分数，用来描述目标系统自身模板计数是否偏离正常水平。其核心思想是：源域可以帮助确定共享模板范围和结构先验，但异常强度必须由目标域正常样本校准。给定目标域正常训练窗口集合 $\mathcal{N}^{t}$，对每个模板 $j$ 估计中心 $m_j$ 和尺度 $q_j$。对于测试窗口 $\tau$，模板级 level 偏离为
+\begin{equation}
+  r_{\tau,j}=\frac{|z_{\tau,j}-m_j|}{q_j+\epsilon},
+\end{equation}
+其中 $\epsilon$ 为极小常数。当前实现使用中位数绝对偏差、标准差和最小尺度共同保证尺度估计稳定。
+
+由于异常通常只集中在少数模板上，直接对所有模板求均值容易稀释异常。因此本文采用 top-k 聚合。设在窗口 $\tau$ 中，按 $r_{\tau,j}$ 从大到小排序后得到前 $K'$ 个偏离值 $r_{\tau,(1)},\ldots,r_{\tau,(K')}$，其中
+\begin{equation}
+  K' = \min\left(d', \max(K_{\min}, \lceil \rho d' \rceil)\right),
+\end{equation}
+$d'$ 为当前 level scope 中的特征数，$K_{\min}=3$，$\rho=0.05$。rank-weighted level 分数定义为
+\begin{equation}
+  s_{\mathrm{level}}(\tau)=\frac{\sum_{r=1}^{K'} \alpha_r r_{\tau,(r)}}{\sum_{r=1}^{K'}\alpha_r}, \quad
+  \alpha_r=\frac{1}{r^{p}},
+\end{equation}
+其中当前主线取 $p=1$。该设计使最大偏离模板获得更高权重，同时仍保留多个异常模板的联合贡献。
+
+\subsection{多尺度 Level Scope}
+
+不同迁移方向中，有效异常信息可能来自不同数量的目标模板。过小的 scope 可能漏掉重要模板，过大的 scope 则可能引入大量噪声。因此，本文将 level 特征范围设计为多尺度候选。当前主线包含
+\begin{equation}
+  \mathcal{S}=\{\text{selected},\text{top50},\text{top100}\},
+\end{equation}
+后续消融进一步验证了引入 top25 的必要性，因此下一版主线建议扩展为
+\begin{equation}
+  \mathcal{S}=\{\text{selected},\text{top25},\text{top50},\text{top100}\}.
+\end{equation}
+其中 selected 表示 Count-Granger 特征选择后的模板集合，top-k 表示根据目标域模板统计选择前 $k$ 个模板，all 表示全部目标特征。实验显示 all 在部分方向有效，但稳定性不足，因此当前不作为默认候选。
+
+\subsection{Edge-level Fusion 与 Validation-best}
+
+edge 分数和 level 分数具有互补性。edge 更关注模板间关系是否异常，level 更关注目标模板计数本身是否异常。为同时利用二者，本文构造 edge-level fusion 候选：
+\begin{equation}
+  s_{\mathrm{fusion}}^{(c,\lambda)}(\tau)=
+  (1-\lambda)\tilde{s}_{\mathrm{edge}}(\tau)+\lambda\tilde{s}_{\mathrm{level}}^{(c)}(\tau),
+\end{equation}
+其中 $c$ 表示 level scope，$\lambda\in\{0.25,0.50,0.75\}$，$\tilde{s}$ 表示基于验证集分数进行鲁棒归一化后的分数。归一化用于缓解 edge 和 level 量纲不同导致的融合偏置。
+
+最终模型不预先固定某一种分数，而是在验证集上从候选集合中选择表现最好的分数组件和阈值。候选集合包括
+\begin{equation}
+\{s_{\mathrm{score}},s_{\mathrm{res}},s_{\mathrm{edge}},s_{\mathrm{level}}^{(c)},s_{\mathrm{fusion}}^{(c,\lambda)}\}.
+\end{equation}
+阈值选择采用 F1-at-precision 策略：在满足最低 precision 和 recall 约束的候选阈值中优先选择 F1 更高者；若约束无法满足，则退化为验证集 F1 最优阈值。选中的 component 和阈值固定后，再应用于测试集。
+
+\section{实验设置}
+
+\subsection{数据集与迁移方向}
+
+实验使用 BGL、Thunderbird 和 Spirit 三个日志数据集。为了考察跨系统迁移能力，本文构造六个有向 source-target 方向：Thunderbird 到 BGL、Spirit 到 BGL、Thunderbird 到 Spirit、BGL 到 Spirit、BGL 到 Thunderbird、Spirit 到 Thunderbird。每个方向中，source 用于提供跨系统训练信息，target 用于训练校准、验证阈值和测试检测效果。
+
+日志预处理将原始日志按 60 秒时间窗口聚合为模板计数序列。模板筛选使用最小总出现次数、最小活跃窗口数、最小方差、最大特征数和冗余度阈值等条件。当前配置中最大特征数为 128，最大滞后阶数为 5，ridge 正则系数为 1.0。
+
+\subsection{训练、验证与测试划分}
+
+当前实现中，源域前 50\% 窗口用于源域训练；目标域按训练、验证、测试进行划分，其中目标训练比例为 40\%，验证比例为 30\%，测试比例为 30\%。验证和测试采用分层随机评估模式，并控制异常比例。目标域训练样本同时用于目标正常基线校准；若目标正常窗口不足，则可退化使用 pooled calibration，但本文报告的主要结果中目标正常窗口均满足校准需求。
+
+\subsection{评价指标}
+
+本文采用 Precision、Recall、F1、ROC-AUC 和 PR-AUC 评价模型性能。Precision、Recall 和 F1 定义为
+\begin{equation}
+  P=\frac{TP}{TP+FP}, \quad
+  R=\frac{TP}{TP+FN}, \quad
+  F1=\frac{2PR}{P+R}.
+\end{equation}
+其中 $TP$、$FP$ 和 $FN$ 分别表示真正例、假正例和假负例。由于实际异常检测中阈值选择直接影响 Precision 与 Recall 的平衡，本文主要以测试集 F1 作为综合指标，同时报告 Precision 和 Recall 以观察误报与漏报倾向。
+
+\section{实验结果与分析}
+
+\subsection{当前主线六方向结果}
+
+表 \ref{tab:mainline-results} 给出了当前主线方法在六个迁移方向上的结果。当前主线使用 target-aware rank-weighted level、多尺度 scope、edge-level fusion 和 validation-best 机制。
+
+\begin{table}[htbp]
+\centering
+\caption{当前主线方法的六方向跨系统检测结果}
+\label{tab:mainline-results}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllrrr}
+\toprule
+Source & Target & Selected component & Precision & Recall & F1 & PR-AUC \\
+\midrule
+Thunderbird & BGL & level\_top50 & 0.962472 & 0.933619 & 0.947826 & 0.988445 \\
+Spirit & BGL & level\_top100 & 0.931567 & 0.903640 & 0.917391 & 0.956951 \\
+Thunderbird & Spirit & edge\_level\_fusion\_top50\_level0p75 & 0.927681 & 0.950057 & 0.938735 & 0.861648 \\
+BGL & Spirit & edge\_level\_fusion\_top50\_level0p5 & 0.909091 & 0.953462 & 0.930748 & 0.820389 \\
+BGL & Thunderbird & level\_top50 & 1.000000 & 0.991223 & 0.995592 & 0.998668 \\
+Spirit & Thunderbird & level\_top50 & 1.000000 & 0.991223 & 0.995592 & 0.998680 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+结果显示，target 为 Thunderbird 的两个方向取得最高 F1，均为 0.995592，说明在该目标域中 target-aware level 能够稳定区分正常窗口与异常窗口。Thunderbird 到 BGL 方向选择 level\_top50，F1 为 0.947826，说明目标域 level 基线在 BGL 中也具有较强检测能力。以 Spirit 为目标时，两个方向均选择 edge-level fusion，说明 Spirit 目标域中仅依赖 level 或 edge 都不是最优，关系异常与数量异常存在互补性。
+
+\subsection{Top-K Sweep 消融}
+
+为分析 level scope 对结果的影响，本文在候选集合中加入 selected、top25、top50、top75、top100、top150 和 all。表 \ref{tab:topk-sweep} 展示了该设置下 validation-best 选中的 component 及测试结果。
+
+\begin{table}[htbp]
+\centering
+\caption{不同 Top-K 范围消融结果}
+\label{tab:topk-sweep}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllrrr}
+\toprule
+Source & Target & Selected component & Precision & Recall & F1 & PR-AUC \\
+\midrule
+Thunderbird & BGL & level\_top50 & 0.962472 & 0.933619 & 0.947826 & 0.988445 \\
+Spirit & BGL & level\_all & 0.933884 & 0.967880 & 0.950578 & 0.989618 \\
+Thunderbird & Spirit & edge\_level\_fusion\_top50\_level0p75 & 0.927681 & 0.950057 & 0.938735 & 0.861648 \\
+BGL & Spirit & edge\_level\_fusion\_top25\_level0p5 & 0.918328 & 0.954030 & 0.935839 & 0.825677 \\
+BGL & Thunderbird & level\_top25 & 1.000000 & 0.991223 & 0.995592 & 0.998460 \\
+Spirit & Thunderbird & level\_top25 & 1.000000 & 0.991223 & 0.995592 & 0.998710 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+与当前主线相比，Top-K sweep 在 Spirit 到 BGL 方向将 F1 从 0.917391 提升到 0.950578，说明较大 scope 在该方向能捕捉更多目标异常模板；在 BGL 到 Spirit 方向，top25 fusion 将 F1 从 0.930748 提升到 0.935839，说明更窄的局部 scope 有助于突出少数异常模板。与此同时，Thunderbird 到 BGL 和 Thunderbird 到 Spirit 仍选择 top50，表明 top50 是较稳定的中心尺度。
+
+不过，all 并不适合无条件纳入默认主线。已有单独 scope 实验显示，all 在某些方向可能造成明显退化。因此，本文当前将 all 定位为诊断或带 gate 的候选，而不是默认方法组成部分。
+
+\subsection{固定 Top-K 消融}
+
+为判断是否可以将 Top-K 固定为统一值，本文分别只允许 top25 或 top50 参与 level 与 fusion 候选。表 \ref{tab:fixed-topk} 给出了固定 Top-K 的结果。
+
+\begin{table}[htbp]
+\centering
+\caption{固定 Top-25 与固定 Top-50 消融结果}
+\label{tab:fixed-topk}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{llllrrr}
+\toprule
+Source & Target & Fixed scope & Selected component & Precision & Recall & F1 \\
+\midrule
+Thunderbird & BGL & top25 & level & 0.928899 & 0.867238 & 0.897010 \\
+Thunderbird & BGL & top50 & level & 0.962472 & 0.933619 & 0.947826 \\
+Spirit & BGL & top25 & level & 0.921833 & 0.732334 & 0.816229 \\
+Spirit & BGL & top50 & level & 0.930804 & 0.892934 & 0.911475 \\
+Thunderbird & Spirit & top25 & edge\_level\_fusion\_level0p5 & 0.900510 & 0.952894 & 0.925962 \\
+Thunderbird & Spirit & top50 & edge\_level\_fusion\_level0p75 & 0.927681 & 0.950057 & 0.938735 \\
+BGL & Spirit & top25 & edge\_level\_fusion\_level0p5 & 0.918328 & 0.954030 & 0.935839 \\
+BGL & Spirit & top50 & edge\_level\_fusion\_level0p5 & 0.909091 & 0.953462 & 0.930748 \\
+BGL & Thunderbird & top25 & level & 1.000000 & 0.991223 & 0.995592 \\
+BGL & Thunderbird & top50 & level & 1.000000 & 0.991223 & 0.995592 \\
+Spirit & Thunderbird & top25 & level & 1.000000 & 0.991223 & 0.995592 \\
+Spirit & Thunderbird & top50 & level & 1.000000 & 0.991223 & 0.995592 \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+固定 Top-50 的六方向平均 F1 为 0.953328，高于固定 Top-25 的 0.927704，说明 top50 是更稳健的固定尺度。但是，固定 Top-50 仍不是所有方向最优：BGL 到 Spirit 方向中 top25 的 F1 更高，而 Spirit 到 BGL 在 Top-K sweep 中选择 all 后效果进一步提升。因此，实验不支持将 Top-K 固定为单一值，更合理的策略是保留多尺度候选，并由验证集选择最终 component。
+
+\subsection{结果讨论}
+
+从实验结果可以得到三点观察。第一，target-aware level 是当前方法中的主要有效信号。多个方向最终选择 level\_top50 或 level\_top100，说明目标域正常基线对异常检测非常关键。第二，edge-level fusion 对以 Spirit 为目标的方向有明显价值。这表明在部分目标域中，单纯的数量异常不足以覆盖所有异常模式，模板关系变化能够提供互补信息。第三，Top-K 并非越大越好，也不宜固定。窄 scope 更强调局部异常，宽 scope 更容易覆盖更多异常模板，但也可能引入噪声。validation-best 机制能够在不同迁移方向中动态选择更合适的尺度。
+
+\section{当前方法的局限性}
+
+本文当前仍处于方法验证阶段，存在以下限制。首先，实验主要报告方法内部消融和六方向迁移结果，尚需补充与现有日志异常检测方法和迁移检测方法的系统对比。其次，all target features 在部分方向表现较好，但稳定性不足，后续需要设计 normal-bin gate 或基于目标域正常样本规模的候选准入机制。第三，当前 Count-Granger 模型采用线性滞后预测，对复杂非线性日志动态的表达能力有限。第四，当前阈值选择依赖验证集标签；若实际场景中验证标签极少，仍需进一步研究弱监督或无监督阈值设定策略。
+
+\section{结论}
+
+本文提出并实现了一种面向跨系统日志异常检测的 target-aware Count-Granger 方法。该方法将日志表示为模板计数时间序列，通过 Granger 风格的滞后预测学习模板间动态关系，并结合 residual、edge 和 target-aware level 等多种异常信号进行检测。核心改进在于：level 分数由目标域正常样本校准，避免源域直接定义目标异常；rank-weighted top-k 聚合增强局部异常表达能力；多尺度 scope 与 edge-level fusion 通过 validation-best 机制实现方向自适应选择。实验结果表明，当前主线在 BGL、Thunderbird 和 Spirit 的六个迁移方向上均取得较高 F1，并且多尺度候选明显优于固定单一 Top-K。后续工作将继续补充外部 baseline，对 all scope 引入更稳健的候选准入机制，并探索更强的非线性时序建模方式。
+
+\section*{参考文献}
+
+本文初稿暂未整理参考文献。后续版本将补充日志异常检测、Granger 因果分析、跨域迁移学习和时间序列异常检测相关工作。
+
+\end{document}

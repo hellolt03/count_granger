@@ -1,13 +1,10 @@
 ablation:
-  name: target_scores
-  description: Current mainline target-aware rank-weighted level with selected/top-50/top-100 scopes and edge-level fusion candidates.
+  name: target_scores_fixed_top50
+  description: Fixed target-aware rank-weighted level scope Top-50 with edge-level fusion candidates.
 
 granger:
   target_score_enabled: true
-  target_score_feature_scopes:
-    - selected
-    - top_50
-    - top_100
+  target_score_feature_scope: top_50
   target_score_top_ratio: 0.05
   target_score_top_min: 3
   target_score_aggregation: rank_weighted_mean
@@ -20,14 +17,8 @@ detect:
     - score
     - residual
     - edge
-    - level_selected
-    - level_top50
-    - level_top100
+    - level
     - edge_level_fusion
-  edge_level_fusion_level_components:
-    - level_selected
-    - level_top50
-    - level_top100
   edge_level_fusion_level_weights:
     - 0.25
     - 0.5
